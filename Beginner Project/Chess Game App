@@ -1,1 +1,490 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
 
+/**
+ * @title ChessGame
+ * @dev A decentralized chess game for two players on Ethereum
+ * @author Chess Game App Team
+ */
+contract ChessGame {
+    
+    // Game states
+    enum GameState { 
+        WaitingForPlayer, 
+        InProgress, 
+        WhiteWins, 
+        BlackWins, 
+        Draw, 
+        Abandoned 
+    }
+    
+    // Piece types
+    enum PieceType { 
+        Empty, 
+        Pawn, 
+        Rook, 
+        Knight, 
+        Bishop, 
+        Queen, 
+        King 
+    }
+    
+    // Piece colors
+    enum PieceColor { 
+        None, 
+        White, 
+        Black 
+    }
+    
+    // Piece structure
+    struct Piece {
+        PieceType pieceType;
+        PieceColor color;
+    }
+    
+    // Move structure
+    struct Move {
+        uint8 fromRow;
+        uint8 fromCol;
+        uint8 toRow;
+        uint8 toCol;
+        uint256 timestamp;
+        address player;
+    }
+    
+    // Game structure
+    struct Game {
+        uint256 gameId;
+        address whitePlayer;
+        address blackPlayer;
+        address currentPlayer;
+        GameState state;
+        Piece[8][8] board;
+        Move[] moveHistory;
+        uint256 startTime;
+        uint256 lastMoveTime;
+        bool whiteKingMoved;
+        bool blackKingMoved;
+        bool whiteRookKingSideMoved;
+        bool whiteRookQueenSideMoved;
+        bool blackRookKingSideMoved;
+        bool blackRookQueenSideMoved;
+        uint256 moveCount;
+        uint256 betAmount;
+    }
+    
+    // State variables
+    uint256 public gameCounter;
+    mapping(uint256 => Game) public games;
+    mapping(address => uint256[]) public playerGames;
+    mapping(address => uint256) public playerWins;
+    mapping(address => uint256) public playerLosses;
+    mapping(address => uint256) public playerDraws;
+    
+    // Events
+    event GameCreated(uint256 indexed gameId, address indexed creator, uint256 betAmount);
+    event PlayerJoined(uint256 indexed gameId, address indexed player);
+    event MoveMade(uint256 indexed gameId, address indexed player, uint8 fromRow, uint8 fromCol, uint8 toRow, uint8 toCol);
+    event GameEnded(uint256 indexed gameId, GameState result, address winner);
+    event GameAbandoned(uint256 indexed gameId, address abandoner);
+    
+    // Modifiers
+    modifier gameExists(uint256 _gameId) {
+        require(_gameId > 0 && _gameId <= gameCounter, "Game does not exist");
+        _;
+    }
+    
+    modifier isPlayerInGame(uint256 _gameId) {
+        Game storage game = games[_gameId];
+        require(
+            msg.sender == game.whitePlayer || msg.sender == game.blackPlayer,
+            "Not a player in this game"
+        );
+        _;
+    }
+    
+    modifier isCurrentPlayer(uint256 _gameId) {
+        require(games[_gameId].currentPlayer == msg.sender, "Not your turn");
+        _;
+    }
+    
+    modifier gameInProgress(uint256 _gameId) {
+        require(games[_gameId].state == GameState.InProgress, "Game not in progress");
+        _;
+    }
+    
+    /**
+     * @dev Create a new chess game
+     */
+    function createGame() external payable returns (uint256) {
+        gameCounter++;
+        uint256 gameId = gameCounter;
+        
+        Game storage newGame = games[gameId];
+        newGame.gameId = gameId;
+        newGame.whitePlayer = msg.sender;
+        newGame.state = GameState.WaitingForPlayer;
+        newGame.startTime = block.timestamp;
+        newGame.lastMoveTime = block.timestamp;
+        newGame.betAmount = msg.value;
+        
+        // Initialize the chess board
+        _initializeBoard(gameId);
+        
+        playerGames[msg.sender].push(gameId);
+        
+        emit GameCreated(gameId, msg.sender, msg.value);
+        return gameId;
+    }
+    
+    /**
+     * @dev Join an existing game
+     */
+    function joinGame(uint256 _gameId) external payable gameExists(_gameId) {
+        Game storage game = games[_gameId];
+        
+        require(game.state == GameState.WaitingForPlayer, "Game not available");
+        require(msg.sender != game.whitePlayer, "Cannot join own game");
+        require(msg.value == game.betAmount, "Incorrect bet amount");
+        
+        game.blackPlayer = msg.sender;
+        game.currentPlayer = game.whitePlayer; // White starts first
+        game.state = GameState.InProgress;
+        
+        playerGames[msg.sender].push(_gameId);
+        
+        emit PlayerJoined(_gameId, msg.sender);
+    }
+    
+    /**
+     * @dev Make a move in the chess game
+     */
+    function makeMove(
+        uint256 _gameId,
+        uint8 _fromRow,
+        uint8 _fromCol,
+        uint8 _toRow,
+        uint8 _toCol
+    ) external gameExists(_gameId) isPlayerInGame(_gameId) isCurrentPlayer(_gameId) gameInProgress(_gameId) {
+        
+        require(_fromRow < 8 && _fromCol < 8 && _toRow < 8 && _toCol < 8, "Invalid board position");
+        
+        Game storage game = games[_gameId];
+        
+        // Validate the move
+        require(_isValidMove(_gameId, _fromRow, _fromCol, _toRow, _toCol), "Invalid move");
+        
+        // Execute the move
+        _executeMove(_gameId, _fromRow, _fromCol, _toRow, _toCol);
+        
+        // Record the move
+        game.moveHistory.push(Move({
+            fromRow: _fromRow,
+            fromCol: _fromCol,
+            toRow: _toRow,
+            toCol: _toCol,
+            timestamp: block.timestamp,
+            player: msg.sender
+        }));
+        
+        game.lastMoveTime = block.timestamp;
+        game.moveCount++;
+        
+        // Switch current player
+        game.currentPlayer = (game.currentPlayer == game.whitePlayer) ? game.blackPlayer : game.whitePlayer;
+        
+        // Check for game end conditions
+        _checkGameEndConditions(_gameId);
+        
+        emit MoveMade(_gameId, msg.sender, _fromRow, _fromCol, _toRow, _toCol);
+    }
+    
+    /**
+     * @dev Abandon a game
+     */
+    function abandonGame(uint256 _gameId) external gameExists(_gameId) isPlayerInGame(_gameId) {
+        Game storage game = games[_gameId];
+        
+        if (game.state == GameState.InProgress) {
+            // The other player wins
+            address winner = (msg.sender == game.whitePlayer) ? game.blackPlayer : game.whitePlayer;
+            game.state = (winner == game.whitePlayer) ? GameState.WhiteWins : GameState.BlackWins;
+            
+            // Update statistics
+            playerWins[winner]++;
+            playerLosses[msg.sender]++;
+            
+            // Transfer winnings
+            if (game.betAmount > 0) {
+                uint256 totalPot = game.betAmount * 2;
+                payable(winner).transfer(totalPot);
+            }
+            
+            emit GameEnded(_gameId, game.state, winner);
+        } else {
+            game.state = GameState.Abandoned;
+            
+            // Refund bets
+            if (game.betAmount > 0) {
+                if (game.whitePlayer != address(0)) {
+                    payable(game.whitePlayer).transfer(game.betAmount);
+                }
+                if (game.blackPlayer != address(0)) {
+                    payable(game.blackPlayer).transfer(game.betAmount);
+                }
+            }
+        }
+        
+        emit GameAbandoned(_gameId, msg.sender);
+    }
+    
+    /**
+     * @dev Initialize the chess board with starting positions
+     */
+    function _initializeBoard(uint256 _gameId) internal {
+        Game storage game = games[_gameId];
+        
+        // Clear the board
+        for (uint8 i = 0; i < 8; i++) {
+            for (uint8 j = 0; j < 8; j++) {
+                game.board[i][j] = Piece(PieceType.Empty, PieceColor.None);
+            }
+        }
+        
+        // Place white pieces
+        game.board[0][0] = Piece(PieceType.Rook, PieceColor.White);
+        game.board[0][1] = Piece(PieceType.Knight, PieceColor.White);
+        game.board[0][2] = Piece(PieceType.Bishop, PieceColor.White);
+        game.board[0][3] = Piece(PieceType.Queen, PieceColor.White);
+        game.board[0][4] = Piece(PieceType.King, PieceColor.White);
+        game.board[0][5] = Piece(PieceType.Bishop, PieceColor.White);
+        game.board[0][6] = Piece(PieceType.Knight, PieceColor.White);
+        game.board[0][7] = Piece(PieceType.Rook, PieceColor.White);
+        
+        for (uint8 i = 0; i < 8; i++) {
+            game.board[1][i] = Piece(PieceType.Pawn, PieceColor.White);
+        }
+        
+        // Place black pieces
+        game.board[7][0] = Piece(PieceType.Rook, PieceColor.Black);
+        game.board[7][1] = Piece(PieceType.Knight, PieceColor.Black);
+        game.board[7][2] = Piece(PieceType.Bishop, PieceColor.Black);
+        game.board[7][3] = Piece(PieceType.Queen, PieceColor.Black);
+        game.board[7][4] = Piece(PieceType.King, PieceColor.Black);
+        game.board[7][5] = Piece(PieceType.Bishop, PieceColor.Black);
+        game.board[7][6] = Piece(PieceType.Knight, PieceColor.Black);
+        game.board[7][7] = Piece(PieceType.Rook, PieceColor.Black);
+        
+        for (uint8 i = 0; i < 8; i++) {
+            game.board[6][i] = Piece(PieceType.Pawn, PieceColor.Black);
+        }
+    }
+    
+    /**
+     * @dev Validate if a move is legal
+     */
+    function _isValidMove(uint256 _gameId, uint8 _fromRow, uint8 _fromCol, uint8 _toRow, uint8 _toCol) internal view returns (bool) {
+        Game storage game = games[_gameId];
+        Piece memory piece = game.board[_fromRow][_fromCol];
+        
+        // Check if there's a piece at the source
+        if (piece.pieceType == PieceType.Empty) return false;
+        
+        // Check if the piece belongs to the current player
+        PieceColor expectedColor = (game.currentPlayer == game.whitePlayer) ? PieceColor.White : PieceColor.Black;
+        if (piece.color != expectedColor) return false;
+        
+        // Check if destination is not occupied by own piece
+        Piece memory destPiece = game.board[_toRow][_toCol];
+        if (destPiece.color == piece.color) return false;
+        
+        // Basic piece movement validation (simplified)
+        return _isValidPieceMove(piece.pieceType, _fromRow, _fromCol, _toRow, _toCol, game.board);
+    }
+    
+    /**
+     * @dev Validate piece-specific movement rules
+     */
+    function _isValidPieceMove(
+        PieceType _pieceType, 
+        uint8 _fromRow, 
+        uint8 _fromCol, 
+        uint8 _toRow, 
+        uint8 _toCol,
+        Piece[8][8] storage _board
+    ) internal view returns (bool) {
+        
+        int8 rowDiff = int8(_toRow) - int8(_fromRow);
+        int8 colDiff = int8(_toCol) - int8(_fromCol);
+        
+        if (_pieceType == PieceType.Pawn) {
+            return _isValidPawnMove(_fromRow, _fromCol, _toRow, _toCol, _board);
+        } else if (_pieceType == PieceType.Rook) {
+            return (rowDiff == 0 || colDiff == 0) && _isPathClear(_fromRow, _fromCol, _toRow, _toCol, _board);
+        } else if (_pieceType == PieceType.Knight) {
+            return (abs(rowDiff) == 2 && abs(colDiff) == 1) || (abs(rowDiff) == 1 && abs(colDiff) == 2);
+        } else if (_pieceType == PieceType.Bishop) {
+            return abs(rowDiff) == abs(colDiff) && _isPathClear(_fromRow, _fromCol, _toRow, _toCol, _board);
+        } else if (_pieceType == PieceType.Queen) {
+            return (rowDiff == 0 || colDiff == 0 || abs(rowDiff) == abs(colDiff)) && _isPathClear(_fromRow, _fromCol, _toRow, _toCol, _board);
+        } else if (_pieceType == PieceType.King) {
+            return abs(rowDiff) <= 1 && abs(colDiff) <= 1;
+        }
+        
+        return false;
+    }
+    
+    /**
+     * @dev Validate pawn movement
+     */
+    function _isValidPawnMove(uint8 _fromRow, uint8 _fromCol, uint8 _toRow, uint8 _toCol, Piece[8][8] storage _board) internal view returns (bool) {
+        Piece memory pawn = _board[_fromRow][_fromCol];
+        Piece memory dest = _board[_toRow][_toCol];
+        
+        int8 direction = (pawn.color == PieceColor.White) ? int8(1) : int8(-1);
+        int8 rowDiff = int8(_toRow) - int8(_fromRow);
+        int8 colDiff = int8(_toCol) - int8(_fromCol);
+        
+        // Forward move
+        if (colDiff == 0 && dest.pieceType == PieceType.Empty) {
+            if (rowDiff == direction) return true;
+            // Double move from starting position
+            if (rowDiff == 2 * direction && 
+                ((pawn.color == PieceColor.White && _fromRow == 1) || 
+                 (pawn.color == PieceColor.Black && _fromRow == 6))) {
+                return true;
+            }
+        }
+        
+        // Diagonal capture
+        if (abs(colDiff) == 1 && rowDiff == direction && dest.pieceType != PieceType.Empty) {
+            return true;
+        }
+        
+        return false;
+    }
+    
+    /**
+     * @dev Check if path is clear for piece movement
+     */
+    function _isPathClear(uint8 _fromRow, uint8 _fromCol, uint8 _toRow, uint8 _toCol, Piece[8][8] storage _board) internal view returns (bool) {
+        int8 rowStep = (_toRow > _fromRow) ? int8(1) : ((_toRow < _fromRow) ? int8(-1) : int8(0));
+        int8 colStep = (_toCol > _fromCol) ? int8(1) : ((_toCol < _fromCol) ? int8(-1) : int8(0));
+        
+        int8 currentRow = int8(_fromRow) + rowStep;
+        int8 currentCol = int8(_fromCol) + colStep;
+        
+        while (currentRow != int8(_toRow) || currentCol != int8(_toCol)) {
+            if (_board[uint8(currentRow)][uint8(currentCol)].pieceType != PieceType.Empty) {
+                return false;
+            }
+            currentRow += rowStep;
+            currentCol += colStep;
+        }
+        
+        return true;
+    }
+    
+    /**
+     * @dev Execute a validated move
+     */
+    function _executeMove(uint256 _gameId, uint8 _fromRow, uint8 _fromCol, uint8 _toRow, uint8 _toCol) internal {
+        Game storage game = games[_gameId];
+        
+        // Move the piece
+        game.board[_toRow][_toCol] = game.board[_fromRow][_fromCol];
+        game.board[_fromRow][_fromCol] = Piece(PieceType.Empty, PieceColor.None);
+        
+        // Update castling flags
+        if (game.board[_toRow][_toCol].pieceType == PieceType.King) {
+            if (game.board[_toRow][_toCol].color == PieceColor.White) {
+                game.whiteKingMoved = true;
+            } else {
+                game.blackKingMoved = true;
+            }
+        }
+        
+        if (game.board[_toRow][_toCol].pieceType == PieceType.Rook) {
+            if (game.board[_toRow][_toCol].color == PieceColor.White) {
+                if (_fromCol == 0) game.whiteRookQueenSideMoved = true;
+                if (_fromCol == 7) game.whiteRookKingSideMoved = true;
+            } else {
+                if (_fromCol == 0) game.blackRookQueenSideMoved = true;
+                if (_fromCol == 7) game.blackRookKingSideMoved = true;
+            }
+        }
+    }
+    
+    /**
+     * @dev Check for game end conditions
+     */
+    function _checkGameEndConditions(uint256 _gameId) internal {
+        // Simplified game end check - in a full implementation, 
+        // you would check for checkmate, stalemate, etc.
+        // For now, we'll implement a basic check
+        
+        // This is a placeholder - full chess rules would require
+        // extensive logic for check, checkmate, stalemate detection
+    }
+    
+    /**
+     * @dev Utility function for absolute value
+     */
+    function abs(int8 x) internal pure returns (uint8) {
+        return x >= 0 ? uint8(x) : uint8(-x);
+    }
+    
+    // View functions for frontend integration
+    
+    /**
+     * @dev Get game information
+     */
+    function getGame(uint256 _gameId) external view gameExists(_gameId) returns (
+        address whitePlayer,
+        address blackPlayer,
+        address currentPlayer,
+        GameState state,
+        uint256 moveCount,
+        uint256 betAmount
+    ) {
+        Game storage game = games[_gameId];
+        return (
+            game.whitePlayer,
+            game.blackPlayer,
+            game.currentPlayer,
+            game.state,
+            game.moveCount,
+            game.betAmount
+        );
+    }
+    
+    /**
+     * @dev Get board state
+     */
+    function getBoardPiece(uint256 _gameId, uint8 _row, uint8 _col) external view gameExists(_gameId) returns (PieceType, PieceColor) {
+        require(_row < 8 && _col < 8, "Invalid position");
+        Piece memory piece = games[_gameId].board[_row][_col];
+        return (piece.pieceType, piece.color);
+    }
+    
+    /**
+     * @dev Get player statistics
+     */
+    function getPlayerStats(address _player) external view returns (uint256 wins, uint256 losses, uint256 draws) {
+        return (playerWins[_player], playerLosses[_player], playerDraws[_player]);
+    }
+    
+    /**
+     * @dev Get player's games
+     */
+    function getPlayerGames(address _player) external view returns (uint256[] memory) {
+        return playerGames[_player];
+    }
+    
+    /**
+     * @dev Get move history
+     */
+    function getMoveHistory(uint256 _gameId) external view gameExists(_gameId) returns (Move[] memory) {
+        return games[_gameId].moveHistory;
+    }
+}
