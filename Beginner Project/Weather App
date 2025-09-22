@@ -1,1 +1,678 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
 
+/**
+ * @title WeatherApp
+ * @dev A decentralized weather information system with comprehensive weather data
+ * @author Weather App Team
+ */
+contract WeatherApp {
+    
+    // Weather condition types
+    enum WeatherCondition {
+        Clear,
+        PartlyCloudy,
+        Cloudy,
+        Overcast,
+        Mist,
+        Fog,
+        LightRain,
+        ModerateRain,
+        HeavyRain,
+        Thunderstorm,
+        LightSnow,
+        HeavySnow,
+        Blizzard,
+        Hail,
+        Sleet
+    }
+    
+    // Wind direction enum
+    enum WindDirection {
+        N,    // North
+        NNE,  // North-Northeast
+        NE,   // Northeast
+        ENE,  // East-Northeast
+        E,    // East
+        ESE,  // East-Southeast
+        SE,   // Southeast
+        SSE,  // South-Southeast
+        S,    // South
+        SSW,  // South-Southwest
+        SW,   // Southwest
+        WSW,  // West-Southwest
+        W,    // West
+        WNW,  // West-Northwest
+        NW,   // Northwest
+        NNW   // North-Northwest
+    }
+    
+    // Air quality index levels
+    enum AirQualityLevel {
+        Good,           // 0-50
+        Moderate,       // 51-100
+        UnhealthyForSensitive, // 101-150
+        Unhealthy,      // 151-200
+        VeryUnhealthy,  // 201-300
+        Hazardous       // 301+
+    }
+    
+    // Weather data structure
+    struct WeatherData {
+        // Basic weather info
+        string city;
+        string country;
+        int256 latitude;    // Multiplied by 1e6 for precision
+        int256 longitude;   // Multiplied by 1e6 for precision
+        
+        // Temperature data (in Celsius * 100 for precision)
+        int256 currentTemp;
+        int256 feelsLike;
+        int256 minTemp;
+        int256 maxTemp;
+        int256 dewPoint;
+        
+        // Pressure and humidity
+        uint256 pressure;        // hPa
+        uint256 humidity;        // Percentage (0-100)
+        uint256 seaLevelPressure; // hPa
+        uint256 groundLevelPressure; // hPa
+        
+        // Wind data
+        uint256 windSpeed;       // m/s * 100 for precision
+        WindDirection windDirection;
+        uint256 windGust;        // m/s * 100 for precision
+        
+        // Visibility and cloud cover
+        uint256 visibility;      // meters
+        uint256 cloudCover;      // Percentage (0-100)
+        
+        // Sun and moon data
+        uint256 sunrise;         // Unix timestamp
+        uint256 sunset;          // Unix timestamp
+        uint256 moonrise;        // Unix timestamp
+        uint256 moonset;         // Unix timestamp
+        uint256 moonPhase;       // 0-100 (0 = new moon, 50 = full moon)
+        
+        // Precipitation
+        uint256 rainLastHour;    // mm * 100 for precision
+        uint256 rainLast3Hours;  // mm * 100 for precision
+        uint256 snowLastHour;    // mm * 100 for precision
+        uint256 snowLast3Hours;  // mm * 100 for precision
+        
+        // Weather condition
+        WeatherCondition condition;
+        string description;
+        
+        // UV and air quality
+        uint256 uvIndex;         // 0-15 scale
+        AirQualityLevel airQuality;
+        uint256 pm25;            // PM2.5 concentration μg/m³
+        uint256 pm10;            // PM10 concentration μg/m³
+        uint256 ozone;           // O3 concentration μg/m³
+        uint256 no2;             // NO2 concentration μg/m³
+        uint256 so2;             // SO2 concentration μg/m³
+        uint256 co;              // CO concentration μg/m³
+        
+        // Metadata
+        uint256 timestamp;
+        address reporter;
+        bool isVerified;
+        uint256 reportCount;
+    }
+    
+    // Weather alert structure
+    struct WeatherAlert {
+        uint256 alertId;
+        string alertType;        // "Storm", "Heat", "Cold", "Flood", etc.
+        string severity;         // "Minor", "Moderate", "Severe", "Extreme"
+        string title;
+        string description;
+        uint256 startTime;
+        uint256 endTime;
+        string[] affectedAreas;
+        bool isActive;
+        address issuer;
+    }
+    
+    // Historical weather record
+    struct HistoricalRecord {
+        uint256 date;           // Date in format YYYYMMDD
+        int256 avgTemp;
+        int256 minTemp;
+        int256 maxTemp;
+        uint256 totalRainfall;
+        uint256 avgHumidity;
+        uint256 avgWindSpeed;
+        WeatherCondition dominantCondition;
+    }
+    
+    // State variables
+    mapping(string => WeatherData) public cityWeather; // city name => weather data
+    mapping(bytes32 => WeatherData) public locationWeather; // location hash => weather data
+    mapping(uint256 => WeatherAlert) public weatherAlerts;
+    mapping(string => HistoricalRecord[]) public cityHistory; // city => historical records
+    mapping(address => bool) public authorizedReporters;
+    mapping(address => uint256) public reporterReputation;
+    
+    string[] public trackedCities;
+    uint256 public alertCounter;
+    address public owner;
+    uint256 public constant REPUTATION_THRESHOLD = 100;
+    
+    // Events
+    event WeatherDataUpdated(
+        string indexed city,
+        int256 temperature,
+        uint256 timestamp,
+        address reporter
+    );
+    event WeatherAlertIssued(
+        uint256 indexed alertId,
+        string alertType,
+        string severity,
+        uint256 startTime
+    );
+    event WeatherAlertUpdated(uint256 indexed alertId, bool isActive);
+    event ReporterAuthorized(address indexed reporter);
+    event ReporterDeauthorized(address indexed reporter);
+    event ReputationUpdated(address indexed reporter, uint256 newReputation);
+    
+    // Modifiers
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Only owner can call this function");
+        _;
+    }
+    
+    modifier onlyAuthorizedReporter() {
+        require(
+            authorizedReporters[msg.sender] || reporterReputation[msg.sender] >= REPUTATION_THRESHOLD,
+            "Not authorized to report weather data"
+        );
+        _;
+    }
+    
+    modifier validCoordinates(int256 _lat, int256 _lng) {
+        require(_lat >= -90000000 && _lat <= 90000000, "Invalid latitude");
+        require(_lng >= -180000000 && _lng <= 180000000, "Invalid longitude");
+        _;
+    }
+    
+    /**
+     * @dev Constructor
+     */
+    constructor() {
+        owner = msg.sender;
+        authorizedReporters[msg.sender] = true;
+        reporterReputation[msg.sender] = 1000; // Owner starts with high reputation
+    }
+    
+    /**
+     * @dev Update comprehensive weather data for a city
+     */
+    function updateWeatherData(
+        string memory _city,
+        string memory _country,
+        int256 _latitude,
+        int256 _longitude,
+        int256 _currentTemp,
+        int256 _feelsLike,
+        int256 _minTemp,
+        int256 _maxTemp,
+        uint256 _pressure,
+        uint256 _humidity,
+        uint256 _windSpeed,
+        WindDirection _windDirection,
+        uint256 _visibility,
+        uint256 _cloudCover,
+        WeatherCondition _condition,
+        string memory _description
+    ) external onlyAuthorizedReporter validCoordinates(_latitude, _longitude) {
+        
+        WeatherData storage weather = cityWeather[_city];
+        
+        // Basic info
+        weather.city = _city;
+        weather.country = _country;
+        weather.latitude = _latitude;
+        weather.longitude = _longitude;
+        
+        // Temperature data
+        weather.currentTemp = _currentTemp;
+        weather.feelsLike = _feelsLike;
+        weather.minTemp = _minTemp;
+        weather.maxTemp = _maxTemp;
+        
+        // Environmental data
+        weather.pressure = _pressure;
+        weather.humidity = _humidity;
+        weather.windSpeed = _windSpeed;
+        weather.windDirection = _windDirection;
+        weather.visibility = _visibility;
+        weather.cloudCover = _cloudCover;
+        weather.condition = _condition;
+        weather.description = _description;
+        
+        // Metadata
+        weather.timestamp = block.timestamp;
+        weather.reporter = msg.sender;
+        weather.reportCount++;
+        
+        // Add to tracked cities if new
+        if (weather.reportCount == 1) {
+            trackedCities.push(_city);
+        }
+        
+        // Update reporter reputation
+        reporterReputation[msg.sender] += 1;
+        
+        emit WeatherDataUpdated(_city, _currentTemp, block.timestamp, msg.sender);
+        emit ReputationUpdated(msg.sender, reporterReputation[msg.sender]);
+    }
+    
+    /**
+     * @dev Update detailed weather parameters
+     */
+    function updateDetailedWeather(
+        string memory _city,
+        int256 _dewPoint,
+        uint256 _seaLevelPressure,
+        uint256 _groundLevelPressure,
+        uint256 _windGust,
+        uint256 _sunrise,
+        uint256 _sunset,
+        uint256 _moonrise,
+        uint256 _moonset,
+        uint256 _moonPhase,
+        uint256 _rainLastHour,
+        uint256 _rainLast3Hours,
+        uint256 _uvIndex
+    ) external onlyAuthorizedReporter {
+        
+        WeatherData storage weather = cityWeather[_city];
+        require(weather.reportCount > 0, "City weather data must exist first");
+        
+        weather.dewPoint = _dewPoint;
+        weather.seaLevelPressure = _seaLevelPressure;
+        weather.groundLevelPressure = _groundLevelPressure;
+        weather.windGust = _windGust;
+        weather.sunrise = _sunrise;
+        weather.sunset = _sunset;
+        weather.moonrise = _moonrise;
+        weather.moonset = _moonset;
+        weather.moonPhase = _moonPhase;
+        weather.rainLastHour = _rainLastHour;
+        weather.rainLast3Hours = _rainLast3Hours;
+        weather.uvIndex = _uvIndex;
+        
+        weather.timestamp = block.timestamp;
+    }
+    
+    /**
+     * @dev Update air quality data
+     */
+    function updateAirQuality(
+        string memory _city,
+        AirQualityLevel _airQuality,
+        uint256 _pm25,
+        uint256 _pm10,
+        uint256 _ozone,
+        uint256 _no2,
+        uint256 _so2,
+        uint256 _co
+    ) external onlyAuthorizedReporter {
+        
+        WeatherData storage weather = cityWeather[_city];
+        require(weather.reportCount > 0, "City weather data must exist first");
+        
+        weather.airQuality = _airQuality;
+        weather.pm25 = _pm25;
+        weather.pm10 = _pm10;
+        weather.ozone = _ozone;
+        weather.no2 = _no2;
+        weather.so2 = _so2;
+        weather.co = _co;
+        
+        weather.timestamp = block.timestamp;
+    }
+    
+    /**
+     * @dev Issue a weather alert
+     */
+    function issueWeatherAlert(
+        string memory _alertType,
+        string memory _severity,
+        string memory _title,
+        string memory _description,
+        uint256 _startTime,
+        uint256 _endTime,
+        string[] memory _affectedAreas
+    ) external onlyAuthorizedReporter returns (uint256) {
+        
+        require(_startTime < _endTime, "Invalid time range");
+        require(_startTime >= block.timestamp, "Start time must be in future");
+        
+        alertCounter++;
+        uint256 alertId = alertCounter;
+        
+        WeatherAlert storage alert = weatherAlerts[alertId];
+        alert.alertId = alertId;
+        alert.alertType = _alertType;
+        alert.severity = _severity;
+        alert.title = _title;
+        alert.description = _description;
+        alert.startTime = _startTime;
+        alert.endTime = _endTime;
+        alert.affectedAreas = _affectedAreas;
+        alert.isActive = true;
+        alert.issuer = msg.sender;
+        
+        emit WeatherAlertIssued(alertId, _alertType, _severity, _startTime);
+        
+        return alertId;
+    }
+    
+    /**
+     * @dev Update weather alert status
+     */
+    function updateAlertStatus(uint256 _alertId, bool _isActive) external onlyAuthorizedReporter {
+        require(_alertId > 0 && _alertId <= alertCounter, "Invalid alert ID");
+        require(weatherAlerts[_alertId].issuer == msg.sender || msg.sender == owner, "Not authorized");
+        
+        weatherAlerts[_alertId].isActive = _isActive;
+        emit WeatherAlertUpdated(_alertId, _isActive);
+    }
+    
+    /**
+     * @dev Add historical weather record
+     */
+    function addHistoricalRecord(
+        string memory _city,
+        uint256 _date,
+        int256 _avgTemp,
+        int256 _minTemp,
+        int256 _maxTemp,
+        uint256 _totalRainfall,
+        uint256 _avgHumidity,
+        uint256 _avgWindSpeed,
+        WeatherCondition _dominantCondition
+    ) external onlyAuthorizedReporter {
+        
+        require(_date > 19700101 && _date < 30000101, "Invalid date format");
+        
+        HistoricalRecord memory record = HistoricalRecord({
+            date: _date,
+            avgTemp: _avgTemp,
+            minTemp: _minTemp,
+            maxTemp: _maxTemp,
+            totalRainfall: _totalRainfall,
+            avgHumidity: _avgHumidity,
+            avgWindSpeed: _avgWindSpeed,
+            dominantCondition: _dominantCondition
+        });
+        
+        cityHistory[_city].push(record);
+    }
+    
+    /**
+     * @dev Authorize a weather reporter
+     */
+    function authorizeReporter(address _reporter) external onlyOwner {
+        authorizedReporters[_reporter] = true;
+        if (reporterReputation[_reporter] == 0) {
+            reporterReputation[_reporter] = 50; // Starting reputation
+        }
+        emit ReporterAuthorized(_reporter);
+    }
+    
+    /**
+     * @dev Deauthorize a weather reporter
+     */
+    function deauthorizeReporter(address _reporter) external onlyOwner {
+        authorizedReporters[_reporter] = false;
+        emit ReporterDeauthorized(_reporter);
+    }
+    
+    /**
+     * @dev Verify weather data (increases reputation)
+     */
+    function verifyWeatherData(string memory _city, bool _isAccurate) external onlyOwner {
+        WeatherData storage weather = cityWeather[_city];
+        require(weather.reportCount > 0, "No weather data for this city");
+        
+        weather.isVerified = _isAccurate;
+        
+        if (_isAccurate) {
+            reporterReputation[weather.reporter] += 5;
+        } else {
+            if (reporterReputation[weather.reporter] > 5) {
+                reporterReputation[weather.reporter] -= 5;
+            }
+        }
+        
+        emit ReputationUpdated(weather.reporter, reporterReputation[weather.reporter]);
+    }
+    
+    // View functions
+    
+    /**
+     * @dev Get current weather for a city
+     */
+    function getCurrentWeather(string memory _city) external view returns (
+        int256 currentTemp,
+        int256 feelsLike,
+        uint256 humidity,
+        uint256 pressure,
+        uint256 windSpeed,
+        WindDirection windDirection,
+        WeatherCondition condition,
+        string memory description,
+        uint256 timestamp
+    ) {
+        WeatherData storage weather = cityWeather[_city];
+        require(weather.reportCount > 0, "No weather data for this city");
+        
+        return (
+            weather.currentTemp,
+            weather.feelsLike,
+            weather.humidity,
+            weather.pressure,
+            weather.windSpeed,
+            weather.windDirection,
+            weather.condition,
+            weather.description,
+            weather.timestamp
+        );
+    }
+    
+    /**
+     * @dev Get detailed weather information
+     */
+    function getDetailedWeather(string memory _city) external view returns (
+        int256 minTemp,
+        int256 maxTemp,
+        int256 dewPoint,
+        uint256 visibility,
+        uint256 cloudCover,
+        uint256 sunrise,
+        uint256 sunset,
+        uint256 uvIndex,
+        uint256 rainLastHour,
+        AirQualityLevel airQuality
+    ) {
+        WeatherData storage weather = cityWeather[_city];
+        require(weather.reportCount > 0, "No weather data for this city");
+        
+        return (
+            weather.minTemp,
+            weather.maxTemp,
+            weather.dewPoint,
+            weather.visibility,
+            weather.cloudCover,
+            weather.sunrise,
+            weather.sunset,
+            weather.uvIndex,
+            weather.rainLastHour,
+            weather.airQuality
+        );
+    }
+    
+    /**
+     * @dev Get air quality details
+     */
+    function getAirQualityDetails(string memory _city) external view returns (
+        AirQualityLevel level,
+        uint256 pm25,
+        uint256 pm10,
+        uint256 ozone,
+        uint256 no2,
+        uint256 so2,
+        uint256 co
+    ) {
+        WeatherData storage weather = cityWeather[_city];
+        require(weather.reportCount > 0, "No weather data for this city");
+        
+        return (
+            weather.airQuality,
+            weather.pm25,
+            weather.pm10,
+            weather.ozone,
+            weather.no2,
+            weather.so2,
+            weather.co
+        );
+    }
+    
+    /**
+     * @dev Get moon and sun information
+     */
+    function getAstronomicalData(string memory _city) external view returns (
+        uint256 sunrise,
+        uint256 sunset,
+        uint256 moonrise,
+        uint256 moonset,
+        uint256 moonPhase
+    ) {
+        WeatherData storage weather = cityWeather[_city];
+        require(weather.reportCount > 0, "No weather data for this city");
+        
+        return (
+            weather.sunrise,
+            weather.sunset,
+            weather.moonrise,
+            weather.moonset,
+            weather.moonPhase
+        );
+    }
+    
+    /**
+     * @dev Get active weather alerts
+     */
+    function getWeatherAlert(uint256 _alertId) external view returns (
+        string memory alertType,
+        string memory severity,
+        string memory title,
+        string memory description,
+        uint256 startTime,
+        uint256 endTime,
+        bool isActive
+    ) {
+        require(_alertId > 0 && _alertId <= alertCounter, "Invalid alert ID");
+        WeatherAlert storage alert = weatherAlerts[_alertId];
+        
+        return (
+            alert.alertType,
+            alert.severity,
+            alert.title,
+            alert.description,
+            alert.startTime,
+            alert.endTime,
+            alert.isActive
+        );
+    }
+    
+    /**
+     * @dev Get historical weather data for a city
+     */
+    function getHistoricalData(string memory _city, uint256 _index) external view returns (
+        uint256 date,
+        int256 avgTemp,
+        int256 minTemp,
+        int256 maxTemp,
+        uint256 totalRainfall,
+        uint256 avgHumidity,
+        WeatherCondition dominantCondition
+    ) {
+        require(_index < cityHistory[_city].length, "Invalid index");
+        HistoricalRecord storage record = cityHistory[_city][_index];
+        
+        return (
+            record.date,
+            record.avgTemp,
+            record.minTemp,
+            record.maxTemp,
+            record.totalRainfall,
+            record.avgHumidity,
+            record.dominantCondition
+        );
+    }
+    
+    /**
+     * @dev Get list of all tracked cities
+     */
+    function getTrackedCities() external view returns (string[] memory) {
+        return trackedCities;
+    }
+    
+    /**
+     * @dev Get reporter information
+     */
+    function getReporterInfo(address _reporter) external view returns (
+        bool isAuthorized,
+        uint256 reputation
+    ) {
+        return (
+            authorizedReporters[_reporter],
+            reporterReputation[_reporter]
+        );
+    }
+    
+    /**
+     * @dev Get historical data count for a city
+     */
+    function getHistoricalDataCount(string memory _city) external view returns (uint256) {
+        return cityHistory[_city].length;
+    }
+    
+    /**
+     * @dev Check if weather data is recent (within last 24 hours)
+     */
+    function isWeatherDataRecent(string memory _city) external view returns (bool) {
+        WeatherData storage weather = cityWeather[_city];
+        if (weather.reportCount == 0) return false;
+        
+        return (block.timestamp - weather.timestamp) <= 24 hours;
+    }
+    
+    /**
+     * @dev Get weather condition as string
+     */
+    function getWeatherConditionString(WeatherCondition _condition) external pure returns (string memory) {
+        if (_condition == WeatherCondition.Clear) return "Clear";
+        if (_condition == WeatherCondition.PartlyCloudy) return "Partly Cloudy";
+        if (_condition == WeatherCondition.Cloudy) return "Cloudy";
+        if (_condition == WeatherCondition.Overcast) return "Overcast";
+        if (_condition == WeatherCondition.Mist) return "Mist";
+        if (_condition == WeatherCondition.Fog) return "Fog";
+        if (_condition == WeatherCondition.LightRain) return "Light Rain";
+        if (_condition == WeatherCondition.ModerateRain) return "Moderate Rain";
+        if (_condition == WeatherCondition.HeavyRain) return "Heavy Rain";
+        if (_condition == WeatherCondition.Thunderstorm) return "Thunderstorm";
+        if (_condition == WeatherCondition.LightSnow) return "Light Snow";
+        if (_condition == WeatherCondition.HeavySnow) return "Heavy Snow";
+        if (_condition == WeatherCondition.Blizzard) return "Blizzard";
+        if (_condition == WeatherCondition.Hail) return "Hail";
+        if (_condition == WeatherCondition.Sleet) return "Sleet";
+        return "Unknown";
+    }
+}
