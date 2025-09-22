@@ -1,1 +1,749 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
 
+/**
+ * @title FaceRecognitionApp
+ * @dev A decentralized face recognition and identity verification system
+ * @author Face Recognition App Team
+ */
+contract FaceRecognitionApp {
+    
+    // Recognition status enum
+    enum RecognitionStatus {
+        Pending,
+        Verified,
+        Rejected,
+        Expired,
+        Blacklisted
+    }
+    
+    // Identity verification level
+    enum VerificationLevel {
+        Basic,      // Simple face match
+        Standard,   // Face + additional data
+        Premium,    // Multi-factor verification
+        Enterprise  // Full KYC verification
+    }
+    
+    // Face data structure (storing hashed/encoded face features)
+    struct FaceData {
+        bytes32 faceHash;           // Hash of face encoding
+        bytes32[] featureHashes;    // Array of facial feature hashes
+        uint256 confidence;         // Confidence score (0-100)
+        uint256 timestamp;          // When face was registered
+        bool isActive;              // Face data status
+        uint256 version;            // Version for face data updates
+    }
+    
+    // User identity structure
+    struct UserIdentity {
+        address userAddress;
+        string userId;              // Unique user identifier
+        string name;                // User's name (encrypted)
+        string email;               // Email (encrypted)
+        bytes32 documentHash;       // Hash of identity document
+        FaceData primaryFace;       // Primary face data
+        FaceData[] alternateFaces;  // Additional face angles/expressions
+        VerificationLevel level;
+        RecognitionStatus status;
+        uint256 registrationTime;
+        uint256 lastActivity;
+        uint256 recognitionCount;
+        bool isVerified;
+        string metadataURI;         // IPFS URI for additional data
+    }
+    
+    // Recognition attempt structure
+    struct RecognitionAttempt {
+        uint256 attemptId;
+        address requester;
+        bytes32 submittedFaceHash;
+        string matchedUserId;
+        uint256 confidence;
+        bool isSuccessful;
+        uint256 timestamp;
+        string location;            // Geographic location
+        bytes32 deviceHash;         // Device fingerprint
+        uint256 processingTime;     // Time taken for recognition
+    }
+    
+    // Access control structure
+    struct AccessPermission {
+        address grantedTo;
+        string[] allowedOperations; // ["view", "verify", "update", etc.]
+        uint256 expiryTime;
+        bool isActive;
+        address grantedBy;
+        string purpose;             // Reason for access
+    }
+    
+    // Biometric template structure
+    struct BiometricTemplate {
+        bytes32 templateId;
+        string templateType;        // "face_encoding", "face_landmarks", etc.
+        bytes encodedData;          // Encrypted biometric template
+        uint256 quality;            // Template quality score
+        string algorithm;           // Algorithm used for extraction
+        uint256 createdAt;
+        bool isEncrypted;
+    }
+    
+    // State variables
+    mapping(string => UserIdentity) public userIdentities;      // userId => UserIdentity
+    mapping(address => string) public addressToUserId;         // address => userId
+    mapping(bytes32 => string) public faceHashToUserId;        // faceHash => userId
+    mapping(uint256 => RecognitionAttempt) public recognitionAttempts;
+    mapping(string => AccessPermission[]) public userPermissions;
+    mapping(bytes32 => BiometricTemplate) public biometricTemplates;
+    mapping(address => bool) public authorizedVerifiers;
+    mapping(string => uint256) public userRecognitionCounts;
+    mapping(address => uint256) public verifierReputations;
+    
+    string[] public registeredUsers;
+    uint256 public attemptCounter;
+    uint256 public templateCounter;
+    address public owner;
+    bool public systemActive;
+    uint256 public constant MIN_CONFIDENCE = 85; // Minimum confidence for recognition
+    uint256 public constant MAX_FACE_VERSIONS = 5;
+    uint256 public constant RECOGNITION_TIMEOUT = 3600; // 1 hour
+    
+    // Events
+    event UserRegistered(
+        string indexed userId,
+        address indexed userAddress,
+        VerificationLevel level,
+        uint256 timestamp
+    );
+    event FaceRecognitionAttempt(
+        uint256 indexed attemptId,
+        string indexed userId,
+        bool successful,
+        uint256 confidence,
+        address requester
+    );
+    event UserVerified(
+        string indexed userId,
+        address indexed verifier,
+        VerificationLevel level
+    );
+    event FaceDataUpdated(
+        string indexed userId,
+        uint256 version,
+        uint256 confidence
+    );
+    event AccessGranted(
+        string indexed userId,
+        address indexed grantedTo,
+        string[] operations,
+        uint256 expiryTime
+    );
+    event AccessRevoked(
+        string indexed userId,
+        address indexed revokedFrom
+    );
+    event SecurityAlert(
+        string alertType,
+        string indexed userId,
+        address indexed triggeredBy,
+        uint256 timestamp
+    );
+    event BiometricTemplateStored(
+        bytes32 indexed templateId,
+        string templateType,
+        uint256 quality
+    );
+    
+    // Modifiers
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Only owner can call this function");
+        _;
+    }
+    
+    modifier onlyAuthorizedVerifier() {
+        require(
+            authorizedVerifiers[msg.sender] || msg.sender == owner,
+            "Not authorized verifier"
+        );
+        _;
+    }
+    
+    modifier onlyUserOrAuthorized(string memory _userId) {
+        UserIdentity storage user = userIdentities[_userId];
+        require(
+            msg.sender == user.userAddress || 
+            authorizedVerifiers[msg.sender] || 
+            msg.sender == owner ||
+            _hasPermission(_userId, msg.sender, "view"),
+            "Not authorized to access user data"
+        );
+        _;
+    }
+    
+    modifier systemIsActive() {
+        require(systemActive, "Face recognition system is inactive");
+        _;
+    }
+    
+    modifier validUserId(string memory _userId) {
+        require(bytes(_userId).length > 0, "Invalid user ID");
+        require(userIdentities[_userId].userAddress != address(0), "User does not exist");
+        _;
+    }
+    
+    /**
+     * @dev Constructor
+     */
+    constructor() {
+        owner = msg.sender;
+        systemActive = true;
+        authorizedVerifiers[msg.sender] = true;
+        verifierReputations[msg.sender] = 1000;
+    }
+    
+    /**
+     * @dev Register a new user with face data
+     */
+    function registerUser(
+        string memory _userId,
+        string memory _name,
+        string memory _email,
+        bytes32 _documentHash,
+        bytes32 _faceHash,
+        bytes32[] memory _featureHashes,
+        uint256 _confidence,
+        VerificationLevel _level,
+        string memory _metadataURI
+    ) external systemIsActive {
+        require(bytes(_userId).length > 0, "Invalid user ID");
+        require(userIdentities[_userId].userAddress == address(0), "User already exists");
+        require(_confidence >= MIN_CONFIDENCE, "Face confidence too low");
+        require(addressToUserId[msg.sender].length == 0, "Address already registered");
+        
+        UserIdentity storage newUser = userIdentities[_userId];
+        newUser.userAddress = msg.sender;
+        newUser.userId = _userId;
+        newUser.name = _name;
+        newUser.email = _email;
+        newUser.documentHash = _documentHash;
+        newUser.level = _level;
+        newUser.status = RecognitionStatus.Pending;
+        newUser.registrationTime = block.timestamp;
+        newUser.lastActivity = block.timestamp;
+        newUser.metadataURI = _metadataURI;
+        
+        // Set primary face data
+        newUser.primaryFace = FaceData({
+            faceHash: _faceHash,
+            featureHashes: _featureHashes,
+            confidence: _confidence,
+            timestamp: block.timestamp,
+            isActive: true,
+            version: 1
+        });
+        
+        // Update mappings
+        addressToUserId[msg.sender] = _userId;
+        faceHashToUserId[_faceHash] = _userId;
+        registeredUsers.push(_userId);
+        
+        emit UserRegistered(_userId, msg.sender, _level, block.timestamp);
+    }
+    
+    /**
+     * @dev Add alternate face data for existing user
+     */
+    function addAlternateFace(
+        string memory _userId,
+        bytes32 _faceHash,
+        bytes32[] memory _featureHashes,
+        uint256 _confidence
+    ) external validUserId(_userId) onlyUserOrAuthorized(_userId) systemIsActive {
+        require(_confidence >= MIN_CONFIDENCE, "Face confidence too low");
+        
+        UserIdentity storage user = userIdentities[_userId];
+        require(user.alternateFaces.length < MAX_FACE_VERSIONS, "Maximum face versions reached");
+        
+        FaceData memory newFace = FaceData({
+            faceHash: _faceHash,
+            featureHashes: _featureHashes,
+            confidence: _confidence,
+            timestamp: block.timestamp,
+            isActive: true,
+            version: user.alternateFaces.length + 2
+        });
+        
+        user.alternateFaces.push(newFace);
+        faceHashToUserId[_faceHash] = _userId;
+        user.lastActivity = block.timestamp;
+        
+        emit FaceDataUpdated(_userId, newFace.version, _confidence);
+    }
+    
+    /**
+     * @dev Perform face recognition
+     */
+    function recognizeFace(
+        bytes32 _faceHash,
+        bytes32[] memory _featureHashes,
+        string memory _location,
+        bytes32 _deviceHash
+    ) external systemIsActive returns (uint256, bool, string memory, uint256) {
+        
+        uint256 startTime = block.timestamp;
+        attemptCounter++;
+        uint256 attemptId = attemptCounter;
+        
+        // Find matching user
+        string memory matchedUserId = _findBestMatch(_faceHash, _featureHashes);
+        bool isSuccessful = bytes(matchedUserId).length > 0;
+        uint256 confidence = 0;
+        
+        if (isSuccessful) {
+            UserIdentity storage user = userIdentities[matchedUserId];
+            confidence = _calculateMatchConfidence(_faceHash, _featureHashes, matchedUserId);
+            
+            // Update user activity
+            user.lastActivity = block.timestamp;
+            user.recognitionCount++;
+            userRecognitionCounts[matchedUserId]++;
+            
+            // Check if user is verified and active
+            if (user.status != RecognitionStatus.Verified) {
+                isSuccessful = false;
+                confidence = 0;
+                emit SecurityAlert("Unverified user recognition attempt", matchedUserId, msg.sender, block.timestamp);
+            }
+        }
+        
+        // Record recognition attempt
+        RecognitionAttempt storage attempt = recognitionAttempts[attemptId];
+        attempt.attemptId = attemptId;
+        attempt.requester = msg.sender;
+        attempt.submittedFaceHash = _faceHash;
+        attempt.matchedUserId = matchedUserId;
+        attempt.confidence = confidence;
+        attempt.isSuccessful = isSuccessful;
+        attempt.timestamp = block.timestamp;
+        attempt.location = _location;
+        attempt.deviceHash = _deviceHash;
+        attempt.processingTime = block.timestamp - startTime;
+        
+        emit FaceRecognitionAttempt(attemptId, matchedUserId, isSuccessful, confidence, msg.sender);
+        
+        return (attemptId, isSuccessful, matchedUserId, confidence);
+    }
+    
+    /**
+     * @dev Verify user identity (by authorized verifier)
+     */
+    function verifyUser(
+        string memory _userId,
+        RecognitionStatus _status,
+        VerificationLevel _level
+    ) external validUserId(_userId) onlyAuthorizedVerifier systemIsActive {
+        
+        UserIdentity storage user = userIdentities[_userId];
+        require(user.status == RecognitionStatus.Pending, "User already processed");
+        
+        user.status = _status;
+        user.level = _level;
+        user.isVerified = (_status == RecognitionStatus.Verified);
+        user.lastActivity = block.timestamp;
+        
+        // Update verifier reputation
+        if (_status == RecognitionStatus.Verified) {
+            verifierReputations[msg.sender] += 10;
+        }
+        
+        emit UserVerified(_userId, msg.sender, _level);
+    }
+    
+    /**
+     * @dev Store biometric template
+     */
+    function storeBiometricTemplate(
+        string memory _userId,
+        string memory _templateType,
+        bytes memory _encodedData,
+        uint256 _quality,
+        string memory _algorithm,
+        bool _isEncrypted
+    ) external validUserId(_userId) onlyUserOrAuthorized(_userId) systemIsActive {
+        
+        templateCounter++;
+        bytes32 templateId = keccak256(abi.encodePacked(_userId, _templateType, templateCounter));
+        
+        BiometricTemplate storage template = biometricTemplates[templateId];
+        template.templateId = templateId;
+        template.templateType = _templateType;
+        template.encodedData = _encodedData;
+        template.quality = _quality;
+        template.algorithm = _algorithm;
+        template.createdAt = block.timestamp;
+        template.isEncrypted = _isEncrypted;
+        
+        emit BiometricTemplateStored(templateId, _templateType, _quality);
+    }
+    
+    /**
+     * @dev Grant access permission to another address
+     */
+    function grantAccess(
+        string memory _userId,
+        address _grantTo,
+        string[] memory _operations,
+        uint256 _expiryTime,
+        string memory _purpose
+    ) external validUserId(_userId) onlyUserOrAuthorized(_userId) {
+        require(_grantTo != address(0), "Invalid address");
+        require(_expiryTime > block.timestamp, "Invalid expiry time");
+        
+        AccessPermission memory permission = AccessPermission({
+            grantedTo: _grantTo,
+            allowedOperations: _operations,
+            expiryTime: _expiryTime,
+            isActive: true,
+            grantedBy: msg.sender,
+            purpose: _purpose
+        });
+        
+        userPermissions[_userId].push(permission);
+        
+        emit AccessGranted(_userId, _grantTo, _operations, _expiryTime);
+    }
+    
+    /**
+     * @dev Revoke access permission
+     */
+    function revokeAccess(
+        string memory _userId,
+        address _revokeFrom,
+        uint256 _permissionIndex
+    ) external validUserId(_userId) onlyUserOrAuthorized(_userId) {
+        require(_permissionIndex < userPermissions[_userId].length, "Invalid permission index");
+        
+        AccessPermission storage permission = userPermissions[_userId][_permissionIndex];
+        require(permission.grantedTo == _revokeFrom, "Address mismatch");
+        require(permission.isActive, "Permission already inactive");
+        
+        permission.isActive = false;
+        
+        emit AccessRevoked(_userId, _revokeFrom);
+    }
+    
+    /**
+     * @dev Update user face data (for improvements/aging)
+     */
+    function updatePrimaryFace(
+        string memory _userId,
+        bytes32 _newFaceHash,
+        bytes32[] memory _newFeatureHashes,
+        uint256 _confidence
+    ) external validUserId(_userId) onlyUserOrAuthorized(_userId) systemIsActive {
+        require(_confidence >= MIN_CONFIDENCE, "Face confidence too low");
+        
+        UserIdentity storage user = userIdentities[_userId];
+        
+        // Archive old face hash mapping
+        delete faceHashToUserId[user.primaryFace.faceHash];
+        
+        // Update primary face
+        user.primaryFace.faceHash = _newFaceHash;
+        user.primaryFace.featureHashes = _newFeatureHashes;
+        user.primaryFace.confidence = _confidence;
+        user.primaryFace.timestamp = block.timestamp;
+        user.primaryFace.version++;
+        user.lastActivity = block.timestamp;
+        
+        // Update mapping
+        faceHashToUserId[_newFaceHash] = _userId;
+        
+        emit FaceDataUpdated(_userId, user.primaryFace.version, _confidence);
+    }
+    
+    /**
+     * @dev Authorize new verifier
+     */
+    function authorizeVerifier(address _verifier) external onlyOwner {
+        authorizedVerifiers[_verifier] = true;
+        verifierReputations[_verifier] = 100; // Starting reputation
+    }
+    
+    /**
+     * @dev Deauthorize verifier
+     */
+    function deauthorizeVerifier(address _verifier) external onlyOwner {
+        authorizedVerifiers[_verifier] = false;
+    }
+    
+    /**
+     * @dev Emergency system toggle
+     */
+    function toggleSystem(bool _active) external onlyOwner {
+        systemActive = _active;
+    }
+    
+    /**
+     * @dev Blacklist user (security measure)
+     */
+    function blacklistUser(string memory _userId, string memory _reason) external validUserId(_userId) onlyOwner {
+        UserIdentity storage user = userIdentities[_userId];
+        user.status = RecognitionStatus.Blacklisted;
+        user.isVerified = false;
+        
+        emit SecurityAlert("User blacklisted", _userId, msg.sender, block.timestamp);
+    }
+    
+    // Internal functions
+    
+    /**
+     * @dev Find best matching user for face recognition
+     */
+    function _findBestMatch(
+        bytes32 _faceHash,
+        bytes32[] memory _featureHashes
+    ) internal view returns (string memory) {
+        
+        // Direct hash match (fastest)
+        string memory directMatch = faceHashToUserId[_faceHash];
+        if (bytes(directMatch).length > 0) {
+            UserIdentity storage user = userIdentities[directMatch];
+            if (user.status == RecognitionStatus.Verified && user.primaryFace.isActive) {
+                return directMatch;
+            }
+        }
+        
+        // Feature-based matching (more comprehensive)
+        uint256 bestScore = 0;
+        string memory bestMatch = "";
+        
+        for (uint256 i = 0; i < registeredUsers.length; i++) {
+            string memory userId = registeredUsers[i];
+            UserIdentity storage user = userIdentities[userId];
+            
+            if (user.status != RecognitionStatus.Verified) continue;
+            
+            uint256 score = _calculateFeatureMatchScore(_featureHashes, user.primaryFace.featureHashes);
+            
+            // Check alternate faces too
+            for (uint256 j = 0; j < user.alternateFaces.length; j++) {
+                if (user.alternateFaces[j].isActive) {
+                    uint256 altScore = _calculateFeatureMatchScore(_featureHashes, user.alternateFaces[j].featureHashes);
+                    if (altScore > score) {
+                        score = altScore;
+                    }
+                }
+            }
+            
+            if (score > bestScore && score >= MIN_CONFIDENCE) {
+                bestScore = score;
+                bestMatch = userId;
+            }
+        }
+        
+        return bestMatch;
+    }
+    
+    /**
+     * @dev Calculate feature matching score
+     */
+    function _calculateFeatureMatchScore(
+        bytes32[] memory _features1,
+        bytes32[] memory _features2
+    ) internal pure returns (uint256) {
+        if (_features1.length == 0 || _features2.length == 0) return 0;
+        
+        uint256 matches = 0;
+        uint256 totalComparisons = _features1.length < _features2.length ? _features1.length : _features2.length;
+        
+        for (uint256 i = 0; i < totalComparisons; i++) {
+            if (_features1[i] == _features2[i]) {
+                matches++;
+            }
+        }
+        
+        return (matches * 100) / totalComparisons;
+    }
+    
+    /**
+     * @dev Calculate match confidence
+     */
+    function _calculateMatchConfidence(
+        bytes32 _faceHash,
+        bytes32[] memory _featureHashes,
+        string memory _userId
+    ) internal view returns (uint256) {
+        UserIdentity storage user = userIdentities[_userId];
+        
+        // Direct hash match gets highest confidence
+        if (user.primaryFace.faceHash == _faceHash) {
+            return user.primaryFace.confidence;
+        }
+        
+        // Check alternate faces
+        for (uint256 i = 0; i < user.alternateFaces.length; i++) {
+            if (user.alternateFaces[i].faceHash == _faceHash) {
+                return user.alternateFaces[i].confidence;
+            }
+        }
+        
+        // Feature-based confidence
+        return _calculateFeatureMatchScore(_featureHashes, user.primaryFace.featureHashes);
+    }
+    
+    /**
+     * @dev Check if address has specific permission
+     */
+    function _hasPermission(
+        string memory _userId,
+        address _address,
+        string memory _operation
+    ) internal view returns (bool) {
+        AccessPermission[] storage permissions = userPermissions[_userId];
+        
+        for (uint256 i = 0; i < permissions.length; i++) {
+            AccessPermission storage perm = permissions[i];
+            
+            if (perm.grantedTo == _address && perm.isActive && perm.expiryTime > block.timestamp) {
+                for (uint256 j = 0; j < perm.allowedOperations.length; j++) {
+                    if (keccak256(bytes(perm.allowedOperations[j])) == keccak256(bytes(_operation))) {
+                        return true;
+                    }
+                }
+            }
+        }
+        
+        return false;
+    }
+    
+    // View functions
+    
+    /**
+     * @dev Get user identity information
+     */
+    function getUserIdentity(string memory _userId) external view validUserId(_userId) onlyUserOrAuthorized(_userId) returns (
+        address userAddress,
+        string memory name,
+        VerificationLevel level,
+        RecognitionStatus status,
+        uint256 registrationTime,
+        uint256 recognitionCount,
+        bool isVerified
+    ) {
+        UserIdentity storage user = userIdentities[_userId];
+        return (
+            user.userAddress,
+            user.name,
+            user.level,
+            user.status,
+            user.registrationTime,
+            user.recognitionCount,
+            user.isVerified
+        );
+    }
+    
+    /**
+     * @dev Get face data information
+     */
+    function getFaceData(string memory _userId) external view validUserId(_userId) onlyUserOrAuthorized(_userId) returns (
+        bytes32 faceHash,
+        uint256 confidence,
+        uint256 timestamp,
+        bool isActive,
+        uint256 version,
+        uint256 alternateFacesCount
+    ) {
+        UserIdentity storage user = userIdentities[_userId];
+        FaceData storage face = user.primaryFace;
+        
+        return (
+            face.faceHash,
+            face.confidence,
+            face.timestamp,
+            face.isActive,
+            face.version,
+            user.alternateFaces.length
+        );
+    }
+    
+    /**
+     * @dev Get recognition attempt details
+     */
+    function getRecognitionAttempt(uint256 _attemptId) external view returns (
+        address requester,
+        string memory matchedUserId,
+        uint256 confidence,
+        bool isSuccessful,
+        uint256 timestamp,
+        string memory location
+    ) {
+        require(_attemptId > 0 && _attemptId <= attemptCounter, "Invalid attempt ID");
+        RecognitionAttempt storage attempt = recognitionAttempts[_attemptId];
+        
+        return (
+            attempt.requester,
+            attempt.matchedUserId,
+            attempt.confidence,
+            attempt.isSuccessful,
+            attempt.timestamp,
+            attempt.location
+        );
+    }
+    
+    /**
+     * @dev Get user statistics
+     */
+    function getUserStats(string memory _userId) external view validUserId(_userId) returns (
+        uint256 totalRecognitions,
+        uint256 lastActivity,
+        uint256 registrationTime,
+        uint256 faceVersions
+    ) {
+        UserIdentity storage user = userIdentities[_userId];
+        return (
+            user.recognitionCount,
+            user.lastActivity,
+            user.registrationTime,
+            user.alternateFaces.length + 1 // Including primary face
+        );
+    }
+    
+    /**
+     * @dev Get system statistics
+     */
+    function getSystemStats() external view returns (
+        uint256 totalUsers,
+        uint256 totalAttempts,
+        uint256 totalTemplates,
+        bool isActive
+    ) {
+        return (
+            registeredUsers.length,
+            attemptCounter,
+            templateCounter,
+            systemActive
+        );
+    }
+    
+    /**
+     * @dev Check if user exists
+     */
+    function userExists(string memory _userId) external view returns (bool) {
+        return userIdentities[_userId].userAddress != address(0);
+    }
+    
+    /**
+     * @dev Get all registered users (only for owner/verifiers)
+     */
+    function getAllUsers() external view onlyAuthorizedVerifier returns (string[] memory) {
+        return registeredUsers;
+    }
+    
+    /**
+     * @dev Get verifier reputation
+     */
+    function getVerifierReputation(address _verifier) external view returns (uint256, bool) {
+        return (verifierReputations[_verifier], authorizedVerifiers[_verifier]);
+    }
+}
