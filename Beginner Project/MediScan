@@ -1,0 +1,229 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+/**
+ * @title Mediscan
+ * @dev A blockchain-based medical record verification and management system
+ * @author Mediscan Team
+ */
+contract Project {
+    
+    // Struct to represent a medical record
+    struct MedicalRecord {
+        uint256 recordId;
+        address patient;
+        address doctor;
+        string recordHash; // IPFS hash or encrypted data hash
+        uint256 timestamp;
+        bool isVerified;
+        bool isActive;
+    }
+    
+    // Struct to represent authorized medical professionals
+    struct Doctor {
+        address doctorAddress;
+        string name;
+        string licenseNumber;
+        bool isVerified;
+        uint256 verificationDate;
+    }
+    
+    // State variables
+    address public owner;
+    uint256 public recordCounter;
+    
+    // Mappings
+    mapping(uint256 => MedicalRecord) public medicalRecords;
+    mapping(address => Doctor) public doctors;
+    mapping(address => uint256[]) public patientRecords;
+    mapping(address => bool) public authorizedDoctors;
+    
+    // Events
+    event RecordCreated(uint256 indexed recordId, address indexed patient, address indexed doctor);
+    event RecordVerified(uint256 indexed recordId, address indexed verifier);
+    event DoctorRegistered(address indexed doctorAddress, string licenseNumber);
+    event DoctorVerified(address indexed doctorAddress, address indexed verifier);
+    
+    // Modifiers
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Only contract owner can perform this action");
+        _;
+    }
+    
+    modifier onlyAuthorizedDoctor() {
+        require(authorizedDoctors[msg.sender], "Only authorized doctors can perform this action");
+        _;
+    }
+    
+    modifier validRecord(uint256 _recordId) {
+        require(_recordId > 0 && _recordId <= recordCounter, "Invalid record ID");
+        require(medicalRecords[_recordId].isActive, "Record is not active");
+        _;
+    }
+    
+    constructor() {
+        owner = msg.sender;
+        recordCounter = 0;
+    }
+    
+    /**
+     * @dev Core Function 1: Create Medical Record
+     * @param _patient Address of the patient
+     * @param _recordHash Hash of the medical record (IPFS hash or encrypted data)
+     * @return recordId The ID of the created medical record
+     */
+    function createMedicalRecord(
+        address _patient,
+        string memory _recordHash
+    ) public onlyAuthorizedDoctor returns (uint256) {
+        require(_patient != address(0), "Invalid patient address");
+        require(bytes(_recordHash).length > 0, "Record hash cannot be empty");
+        
+        recordCounter++;
+        uint256 newRecordId = recordCounter;
+        
+        medicalRecords[newRecordId] = MedicalRecord({
+            recordId: newRecordId,
+            patient: _patient,
+            doctor: msg.sender,
+            recordHash: _recordHash,
+            timestamp: block.timestamp,
+            isVerified: false,
+            isActive: true
+        });
+        
+        patientRecords[_patient].push(newRecordId);
+        
+        emit RecordCreated(newRecordId, _patient, msg.sender);
+        return newRecordId;
+    }
+    
+    /**
+     * @dev Core Function 2: Verify Medical Record
+     * @param _recordId ID of the medical record to verify
+     * @return success True if verification was successful
+     */
+    function verifyMedicalRecord(uint256 _recordId) 
+        public 
+        onlyAuthorizedDoctor 
+        validRecord(_recordId) 
+        returns (bool) {
+        
+        MedicalRecord storage record = medicalRecords[_recordId];
+        require(!record.isVerified, "Record is already verified");
+        require(record.doctor != msg.sender, "Doctor cannot verify their own record");
+        
+        record.isVerified = true;
+        
+        emit RecordVerified(_recordId, msg.sender);
+        return true;
+    }
+    
+    /**
+     * @dev Core Function 3: Register and Authorize Doctor
+     * @param _doctorAddress Address of the doctor to register
+     * @param _name Name of the doctor
+     * @param _licenseNumber Medical license number of the doctor
+     * @return success True if registration was successful
+     */
+    function registerDoctor(
+        address _doctorAddress,
+        string memory _name,
+        string memory _licenseNumber
+    ) public onlyOwner returns (bool) {
+        require(_doctorAddress != address(0), "Invalid doctor address");
+        require(bytes(_name).length > 0, "Doctor name cannot be empty");
+        require(bytes(_licenseNumber).length > 0, "License number cannot be empty");
+        require(!authorizedDoctors[_doctorAddress], "Doctor is already registered");
+        
+        doctors[_doctorAddress] = Doctor({
+            doctorAddress: _doctorAddress,
+            name: _name,
+            licenseNumber: _licenseNumber,
+            isVerified: true,
+            verificationDate: block.timestamp
+        });
+        
+        authorizedDoctors[_doctorAddress] = true;
+        
+        emit DoctorRegistered(_doctorAddress, _licenseNumber);
+        emit DoctorVerified(_doctorAddress, msg.sender);
+        
+        return true;
+    }
+    
+    // Additional utility functions
+    
+    /**
+     * @dev Get patient's medical records
+     * @param _patient Address of the patient
+     * @return Array of record IDs belonging to the patient
+     */
+    function getPatientRecords(address _patient) public view returns (uint256[] memory) {
+        return patientRecords[_patient];
+    }
+    
+    /**
+     * @dev Get medical record details
+     * @param _recordId ID of the medical record
+     * @return All details of the medical record
+     */
+    function getMedicalRecord(uint256 _recordId) 
+        public 
+        view 
+        validRecord(_recordId) 
+        returns (
+            uint256 recordId,
+            address patient,
+            address doctor,
+            string memory recordHash,
+            uint256 timestamp,
+            bool isVerified,
+            bool isActive
+        ) {
+        MedicalRecord memory record = medicalRecords[_recordId];
+        return (
+            record.recordId,
+            record.patient,
+            record.doctor,
+            record.recordHash,
+            record.timestamp,
+            record.isVerified,
+            record.isActive
+        );
+    }
+    
+    /**
+     * @dev Check if a doctor is authorized
+     * @param _doctorAddress Address of the doctor
+     * @return True if doctor is authorized
+     */
+    function isDoctorAuthorized(address _doctorAddress) public view returns (bool) {
+        return authorizedDoctors[_doctorAddress];
+    }
+    
+    /**
+     * @dev Deactivate a medical record (only by owner or the creating doctor)
+     * @param _recordId ID of the record to deactivate
+     */
+    function deactivateRecord(uint256 _recordId) 
+        public 
+        validRecord(_recordId) 
+        returns (bool) {
+        require(
+            msg.sender == owner || msg.sender == medicalRecords[_recordId].doctor,
+            "Only owner or creating doctor can deactivate record"
+        );
+        
+        medicalRecords[_recordId].isActive = false;
+        return true;
+    }
+    
+    /**
+     * @dev Get total number of records
+     * @return Total count of medical records created
+     */
+    function getTotalRecords() public view returns (uint256) {
+        return recordCounter;
+    }
+}
