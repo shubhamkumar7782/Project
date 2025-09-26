@@ -1,0 +1,417 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+/**
+ * @title Quizify
+ * @dev A decentralized quiz platform with rewards and verification system
+ * @author Quizify Team
+ */
+contract Project {
+    
+    // Struct to represent a quiz
+    struct Quiz {
+        uint256 quizId;
+        address creator;
+        string title;
+        string description;
+        uint256 questionCount;
+        uint256 rewardPool;
+        uint256 entryFee;
+        uint256 passingScore;
+        uint256 timeLimit; // in seconds
+        uint256 createdAt;
+        bool isActive;
+        bool isVerified;
+    }
+    
+    // Struct to represent a quiz attempt
+    struct QuizAttempt {
+        uint256 attemptId;
+        uint256 quizId;
+        address participant;
+        uint256 score;
+        uint256 completedAt;
+        bool hasPassed;
+        bool rewardClaimed;
+    }
+    
+    // Struct to represent quiz creators/educators
+    struct Educator {
+        address educatorAddress;
+        string name;
+        string credentials;
+        uint256 quizzesCreated;
+        uint256 totalRewardsDistributed;
+        bool isVerified;
+        uint256 verificationDate;
+    }
+    
+    // State variables
+    address public owner;
+    uint256 public quizCounter;
+    uint256 public attemptCounter;
+    uint256 public platformFeePercent = 5; // 5% platform fee
+    uint256 public totalPlatformFees;
+    
+    // Mappings
+    mapping(uint256 => Quiz) public quizzes;
+    mapping(uint256 => QuizAttempt) public quizAttempts;
+    mapping(address => Educator) public educators;
+    mapping(address => bool) public verifiedEducators;
+    mapping(uint256 => address[]) public quizParticipants;
+    mapping(address => uint256[]) public userAttempts;
+    mapping(uint256 => mapping(address => bool)) public hasAttempted;
+    mapping(uint256 => uint256) public quizSuccessCount;
+    
+    // Events
+    event QuizCreated(uint256 indexed quizId, address indexed creator, string title, uint256 rewardPool);
+    event QuizAttempted(uint256 indexed attemptId, uint256 indexed quizId, address indexed participant, uint256 score);
+    event RewardClaimed(uint256 indexed attemptId, address indexed participant, uint256 amount);
+    event EducatorRegistered(address indexed educator, string name);
+    event EducatorVerified(address indexed educator, address indexed verifier);
+    event QuizVerified(uint256 indexed quizId, address indexed verifier);
+    
+    // Modifiers
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Only contract owner can perform this action");
+        _;
+    }
+    
+    modifier onlyVerifiedEducator() {
+        require(verifiedEducators[msg.sender], "Only verified educators can perform this action");
+        _;
+    }
+    
+    modifier validQuiz(uint256 _quizId) {
+        require(_quizId > 0 && _quizId <= quizCounter, "Invalid quiz ID");
+        require(quizzes[_quizId].isActive, "Quiz is not active");
+        _;
+    }
+    
+    modifier validAttempt(uint256 _attemptId) {
+        require(_attemptId > 0 && _attemptId <= attemptCounter, "Invalid attempt ID");
+        _;
+    }
+    
+    constructor() {
+        owner = msg.sender;
+        quizCounter = 0;
+        attemptCounter = 0;
+    }
+    
+    /**
+     * @dev Core Function 1: Create Quiz
+     * @param _title Title of the quiz
+     * @param _description Description of the quiz
+     * @param _questionCount Number of questions in the quiz
+     * @param _passingScore Minimum score required to pass (out of 100)
+     * @param _timeLimit Time limit for the quiz in seconds
+     * @param _entryFee Entry fee for participants (in wei)
+     * @return quizId The ID of the created quiz
+     */
+    function createQuiz(
+        string memory _title,
+        string memory _description,
+        uint256 _questionCount,
+        uint256 _passingScore,
+        uint256 _timeLimit,
+        uint256 _entryFee
+    ) public payable onlyVerifiedEducator returns (uint256) {
+        require(bytes(_title).length > 0, "Quiz title cannot be empty");
+        require(_questionCount > 0, "Quiz must have at least one question");
+        require(_passingScore > 0 && _passingScore <= 100, "Passing score must be between 1-100");
+        require(_timeLimit > 0, "Time limit must be greater than 0");
+        require(msg.value > 0, "Must provide reward pool");
+        
+        quizCounter++;
+        uint256 newQuizId = quizCounter;
+        
+        quizzes[newQuizId] = Quiz({
+            quizId: newQuizId,
+            creator: msg.sender,
+            title: _title,
+            description: _description,
+            questionCount: _questionCount,
+            rewardPool: msg.value,
+            entryFee: _entryFee,
+            passingScore: _passingScore,
+            timeLimit: _timeLimit,
+            createdAt: block.timestamp,
+            isActive: true,
+            isVerified: false
+        });
+        
+        educators[msg.sender].quizzesCreated++;
+        
+        emit QuizCreated(newQuizId, msg.sender, _title, msg.value);
+        return newQuizId;
+    }
+    
+    /**
+     * @dev Core Function 2: Submit Quiz Attempt
+     * @param _quizId ID of the quiz being attempted
+     * @param _score Score achieved (out of 100)
+     * @return attemptId The ID of the quiz attempt
+     */
+    function submitQuizAttempt(
+        uint256 _quizId,
+        uint256 _score
+    ) public payable validQuiz(_quizId) returns (uint256) {
+        Quiz storage quiz = quizzes[_quizId];
+        require(!hasAttempted[_quizId][msg.sender], "User has already attempted this quiz");
+        require(msg.value >= quiz.entryFee, "Insufficient entry fee");
+        require(_score <= 100, "Score cannot exceed 100");
+        
+        attemptCounter++;
+        uint256 newAttemptId = attemptCounter;
+        
+        bool passed = _score >= quiz.passingScore;
+        
+        quizAttempts[newAttemptId] = QuizAttempt({
+            attemptId: newAttemptId,
+            quizId: _quizId,
+            participant: msg.sender,
+            score: _score,
+            completedAt: block.timestamp,
+            hasPassed: passed,
+            rewardClaimed: false
+        });
+        
+        hasAttempted[_quizId][msg.sender] = true;
+        quizParticipants[_quizId].push(msg.sender);
+        userAttempts[msg.sender].push(newAttemptId);
+        
+        if (passed) {
+            quizSuccessCount[_quizId]++;
+        }
+        
+        // Add entry fee to quiz reward pool (minus platform fee)
+        if (msg.value > quiz.entryFee) {
+            // Return excess payment
+            payable(msg.sender).transfer(msg.value - quiz.entryFee);
+        }
+        
+        uint256 platformFee = (quiz.entryFee * platformFeePercent) / 100;
+        totalPlatformFees += platformFee;
+        quiz.rewardPool += (quiz.entryFee - platformFee);
+        
+        emit QuizAttempted(newAttemptId, _quizId, msg.sender, _score);
+        return newAttemptId;
+    }
+    
+    /**
+     * @dev Core Function 3: Claim Reward
+     * @param _attemptId ID of the quiz attempt
+     * @return success True if reward was successfully claimed
+     */
+    function claimReward(uint256 _attemptId) 
+        public 
+        validAttempt(_attemptId) 
+        returns (bool) {
+        
+        QuizAttempt storage attempt = quizAttempts[_attemptId];
+        Quiz storage quiz = quizzes[attempt.quizId];
+        
+        require(attempt.participant == msg.sender, "Only the participant can claim reward");
+        require(attempt.hasPassed, "Must pass the quiz to claim reward");
+        require(!attempt.rewardClaimed, "Reward already claimed");
+        require(quiz.rewardPool > 0, "No rewards available");
+        
+        uint256 successfulParticipants = quizSuccessCount[attempt.quizId];
+        require(successfulParticipants > 0, "No successful participants");
+        
+        uint256 rewardAmount = quiz.rewardPool / successfulParticipants;
+        require(rewardAmount > 0, "Insufficient reward amount");
+        
+        attempt.rewardClaimed = true;
+        quiz.rewardPool -= rewardAmount;
+        educators[quiz.creator].totalRewardsDistributed += rewardAmount;
+        
+        payable(msg.sender).transfer(rewardAmount);
+        
+        emit RewardClaimed(_attemptId, msg.sender, rewardAmount);
+        return true;
+    }
+    
+    // Additional utility functions
+    
+    /**
+     * @dev Register as an educator
+     * @param _name Name of the educator
+     * @param _credentials Educational credentials or certifications
+     * @return success True if registration was successful
+     */
+    function registerEducator(
+        string memory _name,
+        string memory _credentials
+    ) public returns (bool) {
+        require(bytes(_name).length > 0, "Name cannot be empty");
+        require(educators[msg.sender].educatorAddress == address(0), "Educator already registered");
+        
+        educators[msg.sender] = Educator({
+            educatorAddress: msg.sender,
+            name: _name,
+            credentials: _credentials,
+            quizzesCreated: 0,
+            totalRewardsDistributed: 0,
+            isVerified: false,
+            verificationDate: 0
+        });
+        
+        emit EducatorRegistered(msg.sender, _name);
+        return true;
+    }
+    
+    /**
+     * @dev Verify an educator (only owner)
+     * @param _educatorAddress Address of the educator to verify
+     * @return success True if verification was successful
+     */
+    function verifyEducator(address _educatorAddress) public onlyOwner returns (bool) {
+        require(educators[_educatorAddress].educatorAddress != address(0), "Educator not registered");
+        require(!verifiedEducators[_educatorAddress], "Educator already verified");
+        
+        verifiedEducators[_educatorAddress] = true;
+        educators[_educatorAddress].isVerified = true;
+        educators[_educatorAddress].verificationDate = block.timestamp;
+        
+        emit EducatorVerified(_educatorAddress, msg.sender);
+        return true;
+    }
+    
+    /**
+     * @dev Verify a quiz (only owner)
+     * @param _quizId ID of the quiz to verify
+     * @return success True if verification was successful
+     */
+    function verifyQuiz(uint256 _quizId) public onlyOwner validQuiz(_quizId) returns (bool) {
+        require(!quizzes[_quizId].isVerified, "Quiz already verified");
+        
+        quizzes[_quizId].isVerified = true;
+        
+        emit QuizVerified(_quizId, msg.sender);
+        return true;
+    }
+    
+    /**
+     * @dev Get quiz details
+     * @param _quizId ID of the quiz
+     * @return All details of the quiz
+     */
+    function getQuizDetails(uint256 _quizId) 
+        public 
+        view 
+        validQuiz(_quizId) 
+        returns (
+            string memory title,
+            string memory description,
+            address creator,
+            uint256 questionCount,
+            uint256 rewardPool,
+            uint256 entryFee,
+            uint256 passingScore,
+            uint256 timeLimit,
+            bool isVerified
+        ) {
+        Quiz memory quiz = quizzes[_quizId];
+        return (
+            quiz.title,
+            quiz.description,
+            quiz.creator,
+            quiz.questionCount,
+            quiz.rewardPool,
+            quiz.entryFee,
+            quiz.passingScore,
+            quiz.timeLimit,
+            quiz.isVerified
+        );
+    }
+    
+    /**
+     * @dev Get user's quiz attempts
+     * @param _user Address of the user
+     * @return Array of attempt IDs
+     */
+    function getUserAttempts(address _user) public view returns (uint256[] memory) {
+        return userAttempts[_user];
+    }
+    
+    /**
+     * @dev Get quiz participants
+     * @param _quizId ID of the quiz
+     * @return Array of participant addresses
+     */
+    function getQuizParticipants(uint256 _quizId) public view validQuiz(_quizId) returns (address[] memory) {
+        return quizParticipants[_quizId];
+    }
+    
+    /**
+     * @dev Get quiz statistics
+     * @param _quizId ID of the quiz
+     * @return totalParticipants, successfulParticipants, successRate
+     */
+    function getQuizStats(uint256 _quizId) 
+        public 
+        view 
+        validQuiz(_quizId) 
+        returns (uint256 totalParticipants, uint256 successfulParticipants, uint256 successRate) {
+        
+        totalParticipants = quizParticipants[_quizId].length;
+        successfulParticipants = quizSuccessCount[_quizId];
+        successRate = totalParticipants > 0 ? (successfulParticipants * 100) / totalParticipants : 0;
+        
+        return (totalParticipants, successfulParticipants, successRate);
+    }
+    
+    /**
+     * @dev Withdraw platform fees (only owner)
+     */
+    function withdrawPlatformFees() public onlyOwner {
+        require(totalPlatformFees > 0, "No fees to withdraw");
+        
+        uint256 amount = totalPlatformFees;
+        totalPlatformFees = 0;
+        
+        payable(owner).transfer(amount);
+    }
+    
+    /**
+     * @dev Update platform fee percentage (only owner)
+     * @param _newFeePercent New fee percentage (0-10%)
+     */
+    function updatePlatformFee(uint256 _newFeePercent) public onlyOwner {
+        require(_newFeePercent <= 10, "Fee cannot exceed 10%");
+        platformFeePercent = _newFeePercent;
+    }
+    
+    /**
+     * @dev Deactivate a quiz (only creator or owner)
+     * @param _quizId ID of the quiz to deactivate
+     */
+    function deactivateQuiz(uint256 _quizId) public validQuiz(_quizId) returns (bool) {
+        Quiz storage quiz = quizzes[_quizId];
+        require(
+            msg.sender == quiz.creator || msg.sender == owner,
+            "Only quiz creator or owner can deactivate"
+        );
+        
+        quiz.isActive = false;
+        return true;
+    }
+    
+    /**
+     * @dev Get total number of quizzes
+     * @return Total count of quizzes created
+     */
+    function getTotalQuizzes() public view returns (uint256) {
+        return quizCounter;
+    }
+    
+    /**
+     * @dev Get total number of attempts
+     * @return Total count of quiz attempts
+     */
+    function getTotalAttempts() public view returns (uint256) {
+        return attemptCounter;
+    }
+}
