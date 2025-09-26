@@ -1,0 +1,554 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+/**
+ * @title Facebook Clone App
+ * @dev A decentralized social media platform on blockchain
+ * @author Facebook Clone Team
+ */
+contract Project {
+    
+    // Struct to represent a user profile
+    struct UserProfile {
+        address userAddress;
+        string username;
+        string displayName;
+        string bio;
+        string profileImageHash; // IPFS hash
+        string coverImageHash; // IPFS hash
+        uint256 joinedAt;
+        uint256 totalPosts;
+        uint256 totalFollowers;
+        uint256 totalFollowing;
+        bool isActive;
+        bool isVerified;
+    }
+    
+    // Struct to represent a post
+    struct Post {
+        uint256 postId;
+        address author;
+        string content;
+        string mediaHash; // IPFS hash for images/videos
+        uint256 timestamp;
+        uint256 likeCount;
+        uint256 commentCount;
+        uint256 shareCount;
+        bool isActive;
+        PostType postType;
+    }
+    
+    // Struct to represent a comment
+    struct Comment {
+        uint256 commentId;
+        uint256 postId;
+        address commenter;
+        string content;
+        uint256 timestamp;
+        uint256 likeCount;
+        bool isActive;
+    }
+    
+    // Enum for post types
+    enum PostType {
+        TEXT,
+        IMAGE,
+        VIDEO,
+        LINK
+    }
+    
+    // State variables
+    address public owner;
+    uint256 public userCounter;
+    uint256 public postCounter;
+    uint256 public commentCounter;
+    
+    // Mappings
+    mapping(address => UserProfile) public users;
+    mapping(string => address) public usernameToAddress;
+    mapping(uint256 => Post) public posts;
+    mapping(uint256 => Comment) public comments;
+    mapping(address => bool) public registeredUsers;
+    mapping(address => mapping(address => bool)) public isFollowing;
+    mapping(uint256 => mapping(address => bool)) public hasLikedPost;
+    mapping(uint256 => mapping(address => bool)) public hasLikedComment;
+    mapping(address => uint256[]) public userPosts;
+    mapping(uint256 => uint256[]) public postComments;
+    mapping(address => address[]) public userFollowers;
+    mapping(address => address[]) public userFollowing;
+    
+    // Events
+    event UserRegistered(address indexed user, string username, uint256 timestamp);
+    event PostCreated(uint256 indexed postId, address indexed author, uint256 timestamp);
+    event PostLiked(uint256 indexed postId, address indexed liker, uint256 timestamp);
+    event PostUnliked(uint256 indexed postId, address indexed unliker, uint256 timestamp);
+    event CommentAdded(uint256 indexed commentId, uint256 indexed postId, address indexed commenter, uint256 timestamp);
+    event UserFollowed(address indexed follower, address indexed followed, uint256 timestamp);
+    event UserUnfollowed(address indexed unfollower, address indexed unfollowed, uint256 timestamp);
+    event ProfileUpdated(address indexed user, uint256 timestamp);
+    
+    // Modifiers
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Only contract owner can perform this action");
+        _;
+    }
+    
+    modifier onlyRegisteredUser() {
+        require(registeredUsers[msg.sender], "User must be registered");
+        require(users[msg.sender].isActive, "User account is not active");
+        _;
+    }
+    
+    modifier validPost(uint256 _postId) {
+        require(_postId > 0 && _postId <= postCounter, "Invalid post ID");
+        require(posts[_postId].isActive, "Post is not active");
+        _;
+    }
+    
+    modifier validComment(uint256 _commentId) {
+        require(_commentId > 0 && _commentId <= commentCounter, "Invalid comment ID");
+        require(comments[_commentId].isActive, "Comment is not active");
+        _;
+    }
+    
+    constructor() {
+        owner = msg.sender;
+        userCounter = 0;
+        postCounter = 0;
+        commentCounter = 0;
+    }
+    
+    /**
+     * @dev Core Function 1: Register User Profile
+     * @param _username Unique username for the user
+     * @param _displayName Display name for the user
+     * @param _bio User biography
+     * @param _profileImageHash IPFS hash of profile image
+     * @param _coverImageHash IPFS hash of cover image
+     * @return success True if registration was successful
+     */
+    function registerUser(
+        string memory _username,
+        string memory _displayName,
+        string memory _bio,
+        string memory _profileImageHash,
+        string memory _coverImageHash
+    ) public returns (bool) {
+        require(!registeredUsers[msg.sender], "User already registered");
+        require(bytes(_username).length > 0, "Username cannot be empty");
+        require(bytes(_displayName).length > 0, "Display name cannot be empty");
+        require(usernameToAddress[_username] == address(0), "Username already taken");
+        
+        userCounter++;
+        
+        users[msg.sender] = UserProfile({
+            userAddress: msg.sender,
+            username: _username,
+            displayName: _displayName,
+            bio: _bio,
+            profileImageHash: _profileImageHash,
+            coverImageHash: _coverImageHash,
+            joinedAt: block.timestamp,
+            totalPosts: 0,
+            totalFollowers: 0,
+            totalFollowing: 0,
+            isActive: true,
+            isVerified: false
+        });
+        
+        registeredUsers[msg.sender] = true;
+        usernameToAddress[_username] = msg.sender;
+        
+        emit UserRegistered(msg.sender, _username, block.timestamp);
+        return true;
+    }
+    
+    /**
+     * @dev Core Function 2: Create Post
+     * @param _content Text content of the post
+     * @param _mediaHash IPFS hash of media (image/video)
+     * @param _postType Type of post (TEXT, IMAGE, VIDEO, LINK)
+     * @return postId The ID of the created post
+     */
+    function createPost(
+        string memory _content,
+        string memory _mediaHash,
+        PostType _postType
+    ) public onlyRegisteredUser returns (uint256) {
+        require(bytes(_content).length > 0, "Post content cannot be empty");
+        
+        postCounter++;
+        uint256 newPostId = postCounter;
+        
+        posts[newPostId] = Post({
+            postId: newPostId,
+            author: msg.sender,
+            content: _content,
+            mediaHash: _mediaHash,
+            timestamp: block.timestamp,
+            likeCount: 0,
+            commentCount: 0,
+            shareCount: 0,
+            isActive: true,
+            postType: _postType
+        });
+        
+        userPosts[msg.sender].push(newPostId);
+        users[msg.sender].totalPosts++;
+        
+        emit PostCreated(newPostId, msg.sender, block.timestamp);
+        return newPostId;
+    }
+    
+    /**
+     * @dev Core Function 3: Follow/Unfollow User
+     * @param _userToFollow Address of user to follow or unfollow
+     * @param _follow True to follow, false to unfollow
+     * @return success True if operation was successful
+     */
+    function followUser(address _userToFollow, bool _follow) 
+        public 
+        onlyRegisteredUser 
+        returns (bool) {
+        
+        require(_userToFollow != msg.sender, "Cannot follow yourself");
+        require(registeredUsers[_userToFollow], "Target user is not registered");
+        require(users[_userToFollow].isActive, "Target user is not active");
+        
+        if (_follow) {
+            require(!isFollowing[msg.sender][_userToFollow], "Already following this user");
+            
+            isFollowing[msg.sender][_userToFollow] = true;
+            userFollowers[_userToFollow].push(msg.sender);
+            userFollowing[msg.sender].push(_userToFollow);
+            
+            users[_userToFollow].totalFollowers++;
+            users[msg.sender].totalFollowing++;
+            
+            emit UserFollowed(msg.sender, _userToFollow, block.timestamp);
+        } else {
+            require(isFollowing[msg.sender][_userToFollow], "Not following this user");
+            
+            isFollowing[msg.sender][_userToFollow] = false;
+            
+            // Remove from followers array
+            address[] storage followers = userFollowers[_userToFollow];
+            for (uint256 i = 0; i < followers.length; i++) {
+                if (followers[i] == msg.sender) {
+                    followers[i] = followers[followers.length - 1];
+                    followers.pop();
+                    break;
+                }
+            }
+            
+            // Remove from following array
+            address[] storage following = userFollowing[msg.sender];
+            for (uint256 i = 0; i < following.length; i++) {
+                if (following[i] == _userToFollow) {
+                    following[i] = following[following.length - 1];
+                    following.pop();
+                    break;
+                }
+            }
+            
+            users[_userToFollow].totalFollowers--;
+            users[msg.sender].totalFollowing--;
+            
+            emit UserUnfollowed(msg.sender, _userToFollow, block.timestamp);
+        }
+        
+        return true;
+    }
+    
+    // Additional utility functions
+    
+    /**
+     * @dev Like or unlike a post
+     * @param _postId ID of the post to like/unlike
+     * @param _like True to like, false to unlike
+     * @return success True if operation was successful
+     */
+    function likePost(uint256 _postId, bool _like) 
+        public 
+        onlyRegisteredUser 
+        validPost(_postId) 
+        returns (bool) {
+        
+        if (_like) {
+            require(!hasLikedPost[_postId][msg.sender], "Post already liked");
+            hasLikedPost[_postId][msg.sender] = true;
+            posts[_postId].likeCount++;
+            emit PostLiked(_postId, msg.sender, block.timestamp);
+        } else {
+            require(hasLikedPost[_postId][msg.sender], "Post not liked");
+            hasLikedPost[_postId][msg.sender] = false;
+            posts[_postId].likeCount--;
+            emit PostUnliked(_postId, msg.sender, block.timestamp);
+        }
+        
+        return true;
+    }
+    
+    /**
+     * @dev Add a comment to a post
+     * @param _postId ID of the post to comment on
+     * @param _content Content of the comment
+     * @return commentId The ID of the created comment
+     */
+    function addComment(uint256 _postId, string memory _content) 
+        public 
+        onlyRegisteredUser 
+        validPost(_postId) 
+        returns (uint256) {
+        
+        require(bytes(_content).length > 0, "Comment content cannot be empty");
+        
+        commentCounter++;
+        uint256 newCommentId = commentCounter;
+        
+        comments[newCommentId] = Comment({
+            commentId: newCommentId,
+            postId: _postId,
+            commenter: msg.sender,
+            content: _content,
+            timestamp: block.timestamp,
+            likeCount: 0,
+            isActive: true
+        });
+        
+        postComments[_postId].push(newCommentId);
+        posts[_postId].commentCount++;
+        
+        emit CommentAdded(newCommentId, _postId, msg.sender, block.timestamp);
+        return newCommentId;
+    }
+    
+    /**
+     * @dev Update user profile
+     * @param _displayName New display name
+     * @param _bio New biography
+     * @param _profileImageHash New profile image hash
+     * @param _coverImageHash New cover image hash
+     * @return success True if update was successful
+     */
+    function updateProfile(
+        string memory _displayName,
+        string memory _bio,
+        string memory _profileImageHash,
+        string memory _coverImageHash
+    ) public onlyRegisteredUser returns (bool) {
+        require(bytes(_displayName).length > 0, "Display name cannot be empty");
+        
+        UserProfile storage user = users[msg.sender];
+        user.displayName = _displayName;
+        user.bio = _bio;
+        user.profileImageHash = _profileImageHash;
+        user.coverImageHash = _coverImageHash;
+        
+        emit ProfileUpdated(msg.sender, block.timestamp);
+        return true;
+    }
+    
+    /**
+     * @dev Get user profile by address
+     * @param _userAddress Address of the user
+     * @return All user profile details
+     */
+    function getUserProfile(address _userAddress) 
+        public 
+        view 
+        returns (
+            string memory username,
+            string memory displayName,
+            string memory bio,
+            string memory profileImageHash,
+            string memory coverImageHash,
+            uint256 joinedAt,
+            uint256 totalPosts,
+            uint256 totalFollowers,
+            uint256 totalFollowing,
+            bool isActive,
+            bool isVerified
+        ) {
+        require(registeredUsers[_userAddress], "User not registered");
+        
+        UserProfile memory user = users[_userAddress];
+        return (
+            user.username,
+            user.displayName,
+            user.bio,
+            user.profileImageHash,
+            user.coverImageHash,
+            user.joinedAt,
+            user.totalPosts,
+            user.totalFollowers,
+            user.totalFollowing,
+            user.isActive,
+            user.isVerified
+        );
+    }
+    
+    /**
+     * @dev Get post details
+     * @param _postId ID of the post
+     * @return All post details
+     */
+    function getPost(uint256 _postId) 
+        public 
+        view 
+        validPost(_postId) 
+        returns (
+            address author,
+            string memory content,
+            string memory mediaHash,
+            uint256 timestamp,
+            uint256 likeCount,
+            uint256 commentCount,
+            uint256 shareCount,
+            PostType postType
+        ) {
+        Post memory post = posts[_postId];
+        return (
+            post.author,
+            post.content,
+            post.mediaHash,
+            post.timestamp,
+            post.likeCount,
+            post.commentCount,
+            post.shareCount,
+            post.postType
+        );
+    }
+    
+    /**
+     * @dev Get user's posts
+     * @param _userAddress Address of the user
+     * @return Array of post IDs
+     */
+    function getUserPosts(address _userAddress) 
+        public 
+        view 
+        returns (uint256[] memory) {
+        require(registeredUsers[_userAddress], "User not registered");
+        return userPosts[_userAddress];
+    }
+    
+    /**
+     * @dev Get post comments
+     * @param _postId ID of the post
+     * @return Array of comment IDs
+     */
+    function getPostComments(uint256 _postId) 
+        public 
+        view 
+        validPost(_postId) 
+        returns (uint256[] memory) {
+        return postComments[_postId];
+    }
+    
+    /**
+     * @dev Get user's followers
+     * @param _userAddress Address of the user
+     * @return Array of follower addresses
+     */
+    function getUserFollowers(address _userAddress) 
+        public 
+        view 
+        returns (address[] memory) {
+        require(registeredUsers[_userAddress], "User not registered");
+        return userFollowers[_userAddress];
+    }
+    
+    /**
+     * @dev Get users that a user is following
+     * @param _userAddress Address of the user
+     * @return Array of addresses being followed
+     */
+    function getUserFollowing(address _userAddress) 
+        public 
+        view 
+        returns (address[] memory) {
+        require(registeredUsers[_userAddress], "User not registered");
+        return userFollowing[_userAddress];
+    }
+    
+    /**
+     * @dev Check if user has liked a post
+     * @param _postId ID of the post
+     * @param _user Address of the user
+     * @return True if user has liked the post
+     */
+    function hasUserLikedPost(uint256 _postId, address _user) 
+        public 
+        view 
+        validPost(_postId) 
+        returns (bool) {
+        return hasLikedPost[_postId][_user];
+    }
+    
+    /**
+     * @dev Check if one user is following another
+     * @param _follower Address of potential follower
+     * @param _followed Address of potentially followed user
+     * @return True if follower is following the other user
+     */
+    function isUserFollowing(address _follower, address _followed) 
+        public 
+        view 
+        returns (bool) {
+        return isFollowing[_follower][_followed];
+    }
+    
+    /**
+     * @dev Verify a user (only owner)
+     * @param _userAddress Address of user to verify
+     * @return success True if verification was successful
+     */
+    function verifyUser(address _userAddress) public onlyOwner returns (bool) {
+        require(registeredUsers[_userAddress], "User not registered");
+        require(!users[_userAddress].isVerified, "User already verified");
+        
+        users[_userAddress].isVerified = true;
+        return true;
+    }
+    
+    /**
+     * @dev Deactivate a post (only owner or post author)
+     * @param _postId ID of the post to deactivate
+     */
+    function deactivatePost(uint256 _postId) 
+        public 
+        validPost(_postId) 
+        returns (bool) {
+        require(
+            msg.sender == posts[_postId].author || msg.sender == owner,
+            "Only post author or owner can deactivate post"
+        );
+        
+        posts[_postId].isActive = false;
+        return true;
+    }
+    
+    /**
+     * @dev Get platform statistics
+     * @return totalUsers, totalPosts, totalComments
+     */
+    function getPlatformStats() 
+        public 
+        view 
+        returns (uint256 totalUsers, uint256 totalPosts, uint256 totalComments) {
+        return (userCounter, postCounter, commentCounter);
+    }
+    
+    /**
+     * @dev Get user by username
+     * @param _username Username to look up
+     * @return Address of the user
+     */
+    function getUserByUsername(string memory _username) 
+        public 
+        view 
+        returns (address) {
+        return usernameToAddress[_username];
+    }
+}
