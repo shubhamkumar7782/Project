@@ -1,0 +1,671 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+/**
+ * @title Healthtracker
+ * @dev A decentralized health data management and monitoring platform
+ * @author Healthtracker Team
+ */
+contract Project {
+    
+    // Struct to represent a user's health profile
+    struct HealthProfile {
+        address userAddress;
+        string encryptedPersonalData; // IPFS hash of encrypted personal info
+        uint256 age;
+        string bloodType;
+        string allergies;
+        string chronicConditions;
+        uint256 height; // in cm
+        uint256 weight; // in kg
+        string emergencyContact;
+        uint256 createdAt;
+        uint256 lastUpdated;
+        bool isActive;
+        bool dataConsent;
+    }
+    
+    // Struct to represent health data entries
+    struct HealthEntry {
+        uint256 entryId;
+        address patient;
+        address authorizedProvider; // Doctor, clinic, or device
+        string dataType; // "vitals", "lab_results", "prescription", "exercise", etc.
+        string encryptedData; // IPFS hash of encrypted health data
+        uint256 timestamp;
+        uint256 value; // Numerical value if applicable
+        string unit; // Unit of measurement
+        bool isVerified;
+        bool isEmergency;
+        EntryCategory category;
+    }
+    
+    // Struct to represent authorized healthcare providers
+    struct HealthcareProvider {
+        address providerAddress;
+        string name;
+        string licenseNumber;
+        string specialization;
+        string institutionName;
+        uint256 verificationDate;
+        bool isVerified;
+        bool isActive;
+        ProviderType providerType;
+    }
+    
+    // Enums for categorization
+    enum EntryCategory { 
+        VITALS,           // Blood pressure, heart rate, temperature
+        LAB_RESULTS,      // Blood tests, urine tests, etc.
+        MEDICATIONS,      // Prescriptions and medication tracking
+        EXERCISE,         // Physical activity and fitness data
+        MENTAL_HEALTH,    // Mental health assessments and mood tracking
+        NUTRITION,        // Diet and nutrition information
+        SLEEP,           // Sleep patterns and quality
+        SYMPTOMS,        // Symptom tracking and reports
+        MEDICAL_IMAGING, // X-rays, MRIs, CT scans
+        APPOINTMENTS     // Medical appointments and consultations
+    }
+    
+    enum ProviderType {
+        DOCTOR,
+        NURSE,
+        CLINIC,
+        HOSPITAL,
+        LABORATORY,
+        PHARMACY,
+        FITNESS_TRACKER,
+        WEARABLE_DEVICE
+    }
+    
+    // State variables
+    address public owner;
+    uint256 public profileCounter;
+    uint256 public entryCounter;
+    uint256 public providerCounter;
+    uint256 public totalHealthEntries;
+    
+    // Mappings
+    mapping(address => HealthProfile) public healthProfiles;
+    mapping(uint256 => HealthEntry) public healthEntries;
+    mapping(address => HealthcareProvider) public healthcareProviders;
+    mapping(address => bool) public registeredUsers;
+    mapping(address => bool) public verifiedProviders;
+    mapping(address => uint256[]) public userHealthEntries;
+    mapping(address => mapping(address => bool)) public authorizedAccess;
+    mapping(address => address[]) public userAuthorizedProviders;
+    mapping(string => uint256[]) public entriesByType;
+    mapping(address => mapping(EntryCategory => uint256[])) public categorizedEntries;
+    
+    // Events
+    event HealthProfileCreated(address indexed user, uint256 timestamp);
+    event HealthEntryAdded(uint256 indexed entryId, address indexed patient, address indexed provider, string dataType, uint256 timestamp);
+    event ProviderRegistered(address indexed provider, string name, ProviderType providerType, uint256 timestamp);
+    event ProviderVerified(address indexed provider, address indexed verifier, uint256 timestamp);
+    event AccessGranted(address indexed patient, address indexed provider, uint256 timestamp);
+    event AccessRevoked(address indexed patient, address indexed provider, uint256 timestamp);
+    event EmergencyAlert(address indexed patient, uint256 indexed entryId, string alertType, uint256 timestamp);
+    event DataConssentUpdated(address indexed user, bool consent, uint256 timestamp);
+    event HealthGoalAchieved(address indexed user, string goalType, uint256 value, uint256 timestamp);
+    
+    // Modifiers
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Only contract owner can perform this action");
+        _;
+    }
+    
+    modifier onlyRegisteredUser() {
+        require(registeredUsers[msg.sender], "User must be registered");
+        require(healthProfiles[msg.sender].isActive, "User profile is not active");
+        _;
+    }
+    
+    modifier onlyVerifiedProvider() {
+        require(verifiedProviders[msg.sender], "Only verified providers can perform this action");
+        require(healthcareProviders[msg.sender].isActive, "Provider account is not active");
+        _;
+    }
+    
+    modifier hasAuthorizedAccess(address _patient) {
+        require(
+            authorizedAccess[_patient][msg.sender] || _patient == msg.sender,
+            "Unauthorized access to patient data"
+        );
+        _;
+    }
+    
+    modifier validEntry(uint256 _entryId) {
+        require(_entryId > 0 && _entryId <= entryCounter, "Invalid entry ID");
+        _;
+    }
+    
+    modifier dataConsentGiven(address _patient) {
+        require(healthProfiles[_patient].dataConsent, "Patient has not given data consent");
+        _;
+    }
+    
+    constructor() {
+        owner = msg.sender;
+        profileCounter = 0;
+        entryCounter = 0;
+        providerCounter = 0;
+        totalHealthEntries = 0;
+    }
+    
+    /**
+     * @dev Core Function 1: Create Health Profile
+     * @param _encryptedPersonalData IPFS hash of encrypted personal information
+     * @param _age User's age
+     * @param _bloodType User's blood type
+     * @param _allergies Known allergies
+     * @param _chronicConditions Chronic health conditions
+     * @param _height Height in centimeters
+     * @param _weight Weight in kilograms
+     * @param _emergencyContact Emergency contact information
+     * @param _dataConsent Consent for data usage and sharing
+     * @return success True if profile creation was successful
+     */
+    function createHealthProfile(
+        string memory _encryptedPersonalData,
+        uint256 _age,
+        string memory _bloodType,
+        string memory _allergies,
+        string memory _chronicConditions,
+        uint256 _height,
+        uint256 _weight,
+        string memory _emergencyContact,
+        bool _dataConsent
+    ) public returns (bool) {
+        require(!registeredUsers[msg.sender], "User already has a health profile");
+        require(_age > 0 && _age < 150, "Invalid age");
+        require(_height > 0 && _height < 300, "Invalid height");
+        require(_weight > 0 && _weight < 1000, "Invalid weight");
+        require(bytes(_encryptedPersonalData).length > 0, "Encrypted data cannot be empty");
+        
+        profileCounter++;
+        
+        healthProfiles[msg.sender] = HealthProfile({
+            userAddress: msg.sender,
+            encryptedPersonalData: _encryptedPersonalData,
+            age: _age,
+            bloodType: _bloodType,
+            allergies: _allergies,
+            chronicConditions: _chronicConditions,
+            height: _height,
+            weight: _weight,
+            emergencyContact: _emergencyContact,
+            createdAt: block.timestamp,
+            lastUpdated: block.timestamp,
+            isActive: true,
+            dataConsent: _dataConsent
+        });
+        
+        registeredUsers[msg.sender] = true;
+        
+        emit HealthProfileCreated(msg.sender, block.timestamp);
+        emit DataConssentUpdated(msg.sender, _dataConsent, block.timestamp);
+        return true;
+    }
+    
+    /**
+     * @dev Core Function 2: Add Health Entry
+     * @param _patient Address of the patient (can be self)
+     * @param _dataType Type of health data being recorded
+     * @param _encryptedData IPFS hash of encrypted health data
+     * @param _value Numerical value if applicable
+     * @param _unit Unit of measurement
+     * @param _category Category of the health entry
+     * @param _isEmergency Whether this is an emergency entry
+     * @return entryId The ID of the created health entry
+     */
+    function addHealthEntry(
+        address _patient,
+        string memory _dataType,
+        string memory _encryptedData,
+        uint256 _value,
+        string memory _unit,
+        EntryCategory _category,
+        bool _isEmergency
+    ) public hasAuthorizedAccess(_patient) dataConsentGiven(_patient) returns (uint256) {
+        require(registeredUsers[_patient], "Patient must be registered");
+        require(bytes(_dataType).length > 0, "Data type cannot be empty");
+        require(bytes(_encryptedData).length > 0, "Encrypted data cannot be empty");
+        
+        // Only verified providers or the patient themselves can add entries
+        require(
+            verifiedProviders[msg.sender] || _patient == msg.sender,
+            "Only verified providers or the patient can add health entries"
+        );
+        
+        entryCounter++;
+        uint256 newEntryId = entryCounter;
+        
+        healthEntries[newEntryId] = HealthEntry({
+            entryId: newEntryId,
+            patient: _patient,
+            authorizedProvider: msg.sender,
+            dataType: _dataType,
+            encryptedData: _encryptedData,
+            timestamp: block.timestamp,
+            value: _value,
+            unit: _unit,
+            isVerified: verifiedProviders[msg.sender],
+            isEmergency: _isEmergency,
+            category: _category
+        });
+        
+        userHealthEntries[_patient].push(newEntryId);
+        entriesByType[_dataType].push(newEntryId);
+        categorizedEntries[_patient][_category].push(newEntryId);
+        totalHealthEntries++;
+        
+        // Update profile last updated time
+        healthProfiles[_patient].lastUpdated = block.timestamp;
+        
+        // Emit emergency alert if needed
+        if (_isEmergency) {
+            emit EmergencyAlert(_patient, newEntryId, _dataType, block.timestamp);
+        }
+        
+        emit HealthEntryAdded(newEntryId, _patient, msg.sender, _dataType, block.timestamp);
+        return newEntryId;
+    }
+    
+    /**
+     * @dev Core Function 3: Grant/Revoke Provider Access
+     * @param _provider Address of the healthcare provider
+     * @param _grantAccess True to grant access, false to revoke
+     * @return success True if operation was successful
+     */
+    function manageProviderAccess(address _provider, bool _grantAccess) 
+        public 
+        onlyRegisteredUser 
+        returns (bool) {
+        
+        require(_provider != msg.sender, "Cannot manage access for yourself");
+        require(verifiedProviders[_provider], "Provider must be verified");
+        require(healthcareProviders[_provider].isActive, "Provider must be active");
+        
+        if (_grantAccess) {
+            require(!authorizedAccess[msg.sender][_provider], "Access already granted");
+            
+            authorizedAccess[msg.sender][_provider] = true;
+            userAuthorizedProviders[msg.sender].push(_provider);
+            
+            emit AccessGranted(msg.sender, _provider, block.timestamp);
+        } else {
+            require(authorizedAccess[msg.sender][_provider], "Access not previously granted");
+            
+            authorizedAccess[msg.sender][_provider] = false;
+            
+            // Remove from authorized providers array
+            address[] storage providers = userAuthorizedProviders[msg.sender];
+            for (uint256 i = 0; i < providers.length; i++) {
+                if (providers[i] == _provider) {
+                    providers[i] = providers[providers.length - 1];
+                    providers.pop();
+                    break;
+                }
+            }
+            
+            emit AccessRevoked(msg.sender, _provider, block.timestamp);
+        }
+        
+        return true;
+    }
+    
+    // Additional utility functions
+    
+    /**
+     * @dev Register as healthcare provider
+     * @param _name Name of the provider
+     * @param _licenseNumber Medical license number
+     * @param _specialization Medical specialization
+     * @param _institutionName Name of institution/organization
+     * @param _providerType Type of healthcare provider
+     * @return success True if registration was successful
+     */
+    function registerHealthcareProvider(
+        string memory _name,
+        string memory _licenseNumber,
+        string memory _specialization,
+        string memory _institutionName,
+        ProviderType _providerType
+    ) public returns (bool) {
+        require(healthcareProviders[msg.sender].providerAddress == address(0), "Provider already registered");
+        require(bytes(_name).length > 0, "Name cannot be empty");
+        require(bytes(_licenseNumber).length > 0, "License number cannot be empty");
+        
+        providerCounter++;
+        
+        healthcareProviders[msg.sender] = HealthcareProvider({
+            providerAddress: msg.sender,
+            name: _name,
+            licenseNumber: _licenseNumber,
+            specialization: _specialization,
+            institutionName: _institutionName,
+            verificationDate: 0,
+            isVerified: false,
+            isActive: true,
+            providerType: _providerType
+        });
+        
+        emit ProviderRegistered(msg.sender, _name, _providerType, block.timestamp);
+        return true;
+    }
+    
+    /**
+     * @dev Verify healthcare provider (only owner)
+     * @param _providerAddress Address of the provider to verify
+     * @return success True if verification was successful
+     */
+    function verifyHealthcareProvider(address _providerAddress) 
+        public 
+        onlyOwner 
+        returns (bool) {
+        
+        require(healthcareProviders[_providerAddress].providerAddress != address(0), "Provider not registered");
+        require(!verifiedProviders[_providerAddress], "Provider already verified");
+        
+        verifiedProviders[_providerAddress] = true;
+        healthcareProviders[_providerAddress].isVerified = true;
+        healthcareProviders[_providerAddress].verificationDate = block.timestamp;
+        
+        emit ProviderVerified(_providerAddress, msg.sender, block.timestamp);
+        return true;
+    }
+    
+    /**
+     * @dev Update health profile information
+     * @param _age Updated age
+     * @param _weight Updated weight
+     * @param _allergies Updated allergies
+     * @param _chronicConditions Updated chronic conditions
+     * @param _emergencyContact Updated emergency contact
+     * @return success True if update was successful
+     */
+    function updateHealthProfile(
+        uint256 _age,
+        uint256 _weight,
+        string memory _allergies,
+        string memory _chronicConditions,
+        string memory _emergencyContact
+    ) public onlyRegisteredUser returns (bool) {
+        require(_age > 0 && _age < 150, "Invalid age");
+        require(_weight > 0 && _weight < 1000, "Invalid weight");
+        
+        HealthProfile storage profile = healthProfiles[msg.sender];
+        profile.age = _age;
+        profile.weight = _weight;
+        profile.allergies = _allergies;
+        profile.chronicConditions = _chronicConditions;
+        profile.emergencyContact = _emergencyContact;
+        profile.lastUpdated = block.timestamp;
+        
+        return true;
+    }
+    
+    /**
+     * @dev Update data consent
+     * @param _consent New consent status
+     * @return success True if update was successful
+     */
+    function updateDataConsent(bool _consent) 
+        public 
+        onlyRegisteredUser 
+        returns (bool) {
+        
+        healthProfiles[msg.sender].dataConsent = _consent;
+        healthProfiles[msg.sender].lastUpdated = block.timestamp;
+        
+        emit DataConssentUpdated(msg.sender, _consent, block.timestamp);
+        return true;
+    }
+    
+    /**
+     * @dev Get health profile information
+     * @param _userAddress Address of the user
+     * @return Basic health profile details (non-sensitive)
+     */
+    function getHealthProfile(address _userAddress) 
+        public 
+        view 
+        hasAuthorizedAccess(_userAddress)
+        returns (
+            uint256 age,
+            string memory bloodType,
+            uint256 height,
+            uint256 weight,
+            uint256 createdAt,
+            uint256 lastUpdated,
+            bool isActive
+        ) {
+        require(registeredUsers[_userAddress], "User not registered");
+        
+        HealthProfile memory profile = healthProfiles[_userAddress];
+        return (
+            profile.age,
+            profile.bloodType,
+            profile.height,
+            profile.weight,
+            profile.createdAt,
+            profile.lastUpdated,
+            profile.isActive
+        );
+    }
+    
+    /**
+     * @dev Get health entry details
+     * @param _entryId ID of the health entry
+     * @return Health entry information
+     */
+    function getHealthEntry(uint256 _entryId) 
+        public 
+        view 
+        validEntry(_entryId)
+        hasAuthorizedAccess(healthEntries[_entryId].patient)
+        returns (
+            address patient,
+            address authorizedProvider,
+            string memory dataType,
+            string memory encryptedData,
+            uint256 timestamp,
+            uint256 value,
+            string memory unit,
+            bool isVerified,
+            EntryCategory category
+        ) {
+        HealthEntry memory entry = healthEntries[_entryId];
+        return (
+            entry.patient,
+            entry.authorizedProvider,
+            entry.dataType,
+            entry.encryptedData,
+            entry.timestamp,
+            entry.value,
+            entry.unit,
+            entry.isVerified,
+            entry.category
+        );
+    }
+    
+    /**
+     * @dev Get user's health entries
+     * @param _userAddress Address of the user
+     * @return Array of health entry IDs
+     */
+    function getUserHealthEntries(address _userAddress) 
+        public 
+        view 
+        hasAuthorizedAccess(_userAddress)
+        returns (uint256[] memory) {
+        require(registeredUsers[_userAddress], "User not registered");
+        return userHealthEntries[_userAddress];
+    }
+    
+    /**
+     * @dev Get health entries by category
+     * @param _userAddress Address of the user
+     * @param _category Category to filter by
+     * @return Array of health entry IDs in the specified category
+     */
+    function getEntriesByCategory(address _userAddress, EntryCategory _category) 
+        public 
+        view 
+        hasAuthorizedAccess(_userAddress)
+        returns (uint256[] memory) {
+        require(registeredUsers[_userAddress], "User not registered");
+        return categorizedEntries[_userAddress][_category];
+    }
+    
+    /**
+     * @dev Get user's authorized providers
+     * @param _userAddress Address of the user
+     * @return Array of authorized provider addresses
+     */
+    function getUserAuthorizedProviders(address _userAddress) 
+        public 
+        view 
+        returns (address[] memory) {
+        require(
+            _userAddress == msg.sender || msg.sender == owner,
+            "Only user or owner can view authorized providers"
+        );
+        return userAuthorizedProviders[_userAddress];
+    }
+    
+    /**
+     * @dev Get healthcare provider information
+     * @param _providerAddress Address of the provider
+     * @return Provider details
+     */
+    function getHealthcareProvider(address _providerAddress) 
+        public 
+        view 
+        returns (
+            string memory name,
+            string memory licenseNumber,
+            string memory specialization,
+            string memory institutionName,
+            bool isVerified,
+            bool isActive,
+            ProviderType providerType
+        ) {
+        require(healthcareProviders[_providerAddress].providerAddress != address(0), "Provider not found");
+        
+        HealthcareProvider memory provider = healthcareProviders[_providerAddress];
+        return (
+            provider.name,
+            provider.licenseNumber,
+            provider.specialization,
+            provider.institutionName,
+            provider.isVerified,
+            provider.isActive,
+            provider.providerType
+        );
+    }
+    
+    /**
+     * @dev Check if provider has access to patient data
+     * @param _patient Patient address
+     * @param _provider Provider address
+     * @return True if provider has access
+     */
+    function hasProviderAccess(address _patient, address _provider) 
+        public 
+        view 
+        returns (bool) {
+        return authorizedAccess[_patient][_provider] || _patient == _provider;
+    }
+    
+    /**
+     * @dev Get platform statistics
+     * @return totalProfiles, totalProviders, totalEntries
+     */
+    function getPlatformStats() 
+        public 
+        view 
+        returns (
+            uint256 totalProfiles,
+            uint256 totalProviders,
+            uint256 totalEntries
+        ) {
+        return (profileCounter, providerCounter, totalHealthEntries);
+    }
+    
+    /**
+     * @dev Get emergency health information (accessible by emergency services)
+     * @param _patient Patient address
+     * @return Emergency contact and critical health info
+     */
+    function getEmergencyInfo(address _patient) 
+        public 
+        view 
+        returns (
+            string memory bloodType,
+            string memory allergies,
+            string memory chronicConditions,
+            string memory emergencyContact
+        ) {
+        require(registeredUsers[_patient], "Patient not registered");
+        
+        // In a real implementation, this would be restricted to verified emergency services
+        // For now, we'll allow anyone to access this critical information in emergencies
+        
+        HealthProfile memory profile = healthProfiles[_patient];
+        return (
+            profile.bloodType,
+            profile.allergies,
+            profile.chronicConditions,
+            profile.emergencyContact
+        );
+    }
+    
+    /**
+     * @dev Deactivate user profile (user can reactivate later)
+     * @return success True if deactivation was successful
+     */
+    function deactivateProfile() 
+        public 
+        onlyRegisteredUser 
+        returns (bool) {
+        
+        healthProfiles[msg.sender].isActive = false;
+        healthProfiles[msg.sender].lastUpdated = block.timestamp;
+        
+        return true;
+    }
+    
+    /**
+     * @dev Reactivate user profile
+     * @return success True if reactivation was successful
+     */
+    function reactivateProfile() 
+        public 
+        returns (bool) {
+        
+        require(registeredUsers[msg.sender], "User must be registered");
+        require(!healthProfiles[msg.sender].isActive, "Profile already active");
+        
+        healthProfiles[msg.sender].isActive = true;
+        healthProfiles[msg.sender].lastUpdated = block.timestamp;
+        
+        return true;
+    }
+    
+    /**
+     * @dev Get health trends and analytics (simplified version)
+     * @param _userAddress User address
+     * @param _category Category to analyze
+     * @return entryCount Number of entries in category
+     */
+    function getHealthTrends(address _userAddress, EntryCategory _category) 
+        public 
+        view 
+        hasAuthorizedAccess(_userAddress)
+        returns (uint256 entryCount) {
+        
+        require(registeredUsers[_userAddress], "User not registered");
+        return categorizedEntries[_userAddress][_category].length;
+    }
+}
