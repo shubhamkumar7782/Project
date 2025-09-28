@@ -1,0 +1,628 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+/**
+ * @title Foodsnap
+ * @dev A decentralized food sharing and waste reduction platform
+ * @author Foodsnap Team
+ */
+contract Project {
+    
+    // Struct to represent a food listing
+    struct FoodListing {
+        uint256 listingId;
+        address donor;
+        string foodName;
+        string description;
+        string category;
+        uint256 quantity;
+        string imageHash; // IPFS hash
+        string location;
+        uint256 expiryTime;
+        uint256 createdAt;
+        uint256 pricePerUnit; // 0 for free food
+        bool isAvailable;
+        bool isVerified;
+        FoodCondition condition;
+        ListingType listingType;
+    }
+    
+    // Struct to represent a food claim/transaction
+    struct FoodClaim {
+        uint256 claimId;
+        uint256 listingId;
+        address claimer;
+        address donor;
+        uint256 quantityClaimed;
+        uint256 totalAmount; // Total payment if not free
+        uint256 claimTime;
+        bool isCompleted;
+        bool isConfirmed;
+        ClaimStatus status;
+    }
+    
+    // Struct to represent user profile
+    struct UserProfile {
+        address userAddress;
+        string name;
+        string email;
+        string location;
+        string profileImageHash;
+        uint256 totalDonations;
+        uint256 totalClaims;
+        uint256 sustainabilityScore;
+        uint256 joinedAt;
+        bool isVerified;
+        bool isActive;
+        UserType userType;
+    }
+    
+    // Enums for categorization
+    enum FoodCondition { FRESH, GOOD, NEAR_EXPIRY, EXPIRED }
+    enum ListingType { FREE, DISCOUNTED, REGULAR }
+    enum ClaimStatus { PENDING, CONFIRMED, COLLECTED, CANCELLED }
+    enum UserType { INDIVIDUAL, RESTAURANT, GROCERY_STORE, CHARITY }
+    
+    // State variables
+    address public owner;
+    uint256 public listingCounter;
+    uint256 public claimCounter;
+    uint256 public userCounter;
+    uint256 public totalFoodSaved; // in kg
+    uint256 public platformFeePercent = 3; // 3% platform fee for paid listings
+    uint256 public totalPlatformFees;
+    
+    // Mappings
+    mapping(uint256 => FoodListing) public foodListings;
+    mapping(uint256 => FoodClaim) public foodClaims;
+    mapping(address => UserProfile) public users;
+    mapping(address => bool) public registeredUsers;
+    mapping(address => uint256[]) public userListings;
+    mapping(address => uint256[]) public userClaims;
+    mapping(string => uint256[]) public locationListings;
+    mapping(string => uint256[]) public categoryListings;
+    mapping(uint256 => uint256[]) public listingClaims;
+    
+    // Events
+    event UserRegistered(address indexed user, string name, UserType userType, uint256 timestamp);
+    event FoodListed(uint256 indexed listingId, address indexed donor, string foodName, uint256 quantity, uint256 timestamp);
+    event FoodClaimed(uint256 indexed claimId, uint256 indexed listingId, address indexed claimer, uint256 quantity, uint256 timestamp);
+    event ClaimConfirmed(uint256 indexed claimId, address indexed donor, uint256 timestamp);
+    event ClaimCompleted(uint256 indexed claimId, uint256 sustainabilityPoints, uint256 timestamp);
+    event SustainabilityReward(address indexed user, uint256 points, uint256 timestamp);
+    event ListingVerified(uint256 indexed listingId, address indexed verifier, uint256 timestamp);
+    
+    // Modifiers
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Only contract owner can perform this action");
+        _;
+    }
+    
+    modifier onlyRegisteredUser() {
+        require(registeredUsers[msg.sender], "User must be registered");
+        require(users[msg.sender].isActive, "User account is not active");
+        _;
+    }
+    
+    modifier validListing(uint256 _listingId) {
+        require(_listingId > 0 && _listingId <= listingCounter, "Invalid listing ID");
+        require(foodListings[_listingId].isAvailable, "Food listing is not available");
+        _;
+    }
+    
+    modifier validClaim(uint256 _claimId) {
+        require(_claimId > 0 && _claimId <= claimCounter, "Invalid claim ID");
+        _;
+    }
+    
+    modifier notExpired(uint256 _listingId) {
+        require(block.timestamp < foodListings[_listingId].expiryTime, "Food listing has expired");
+        _;
+    }
+    
+    constructor() {
+        owner = msg.sender;
+        listingCounter = 0;
+        claimCounter = 0;
+        userCounter = 0;
+        totalFoodSaved = 0;
+    }
+    
+    /**
+     * @dev Core Function 1: Register User Profile
+     * @param _name Name of the user/organization
+     * @param _email Email address for contact
+     * @param _location Geographic location
+     * @param _profileImageHash IPFS hash of profile image
+     * @param _userType Type of user (Individual, Restaurant, etc.)
+     * @return success True if registration was successful
+     */
+    function registerUser(
+        string memory _name,
+        string memory _email,
+        string memory _location,
+        string memory _profileImageHash,
+        UserType _userType
+    ) public returns (bool) {
+        require(!registeredUsers[msg.sender], "User already registered");
+        require(bytes(_name).length > 0, "Name cannot be empty");
+        require(bytes(_email).length > 0, "Email cannot be empty");
+        require(bytes(_location).length > 0, "Location cannot be empty");
+        
+        userCounter++;
+        
+        users[msg.sender] = UserProfile({
+            userAddress: msg.sender,
+            name: _name,
+            email: _email,
+            location: _location,
+            profileImageHash: _profileImageHash,
+            totalDonations: 0,
+            totalClaims: 0,
+            sustainabilityScore: 0,
+            joinedAt: block.timestamp,
+            isVerified: false,
+            isActive: true,
+            userType: _userType
+        });
+        
+        registeredUsers[msg.sender] = true;
+        
+        emit UserRegistered(msg.sender, _name, _userType, block.timestamp);
+        return true;
+    }
+    
+    /**
+     * @dev Core Function 2: List Food for Sharing
+     * @param _foodName Name of the food item
+     * @param _description Detailed description of the food
+     * @param _category Food category (e.g., "Vegetables", "Dairy", "Cooked Meals")
+     * @param _quantity Quantity available (in appropriate units)
+     * @param _imageHash IPFS hash of food image
+     * @param _location Pickup location
+     * @param _expiryTime Expiry timestamp
+     * @param _pricePerUnit Price per unit (0 for free food)
+     * @param _condition Current condition of food
+     * @param _listingType Type of listing (FREE, DISCOUNTED, REGULAR)
+     * @return listingId The ID of the created food listing
+     */
+    function listFood(
+        string memory _foodName,
+        string memory _description,
+        string memory _category,
+        uint256 _quantity,
+        string memory _imageHash,
+        string memory _location,
+        uint256 _expiryTime,
+        uint256 _pricePerUnit,
+        FoodCondition _condition,
+        ListingType _listingType
+    ) public onlyRegisteredUser returns (uint256) {
+        require(bytes(_foodName).length > 0, "Food name cannot be empty");
+        require(_quantity > 0, "Quantity must be greater than 0");
+        require(_expiryTime > block.timestamp, "Expiry time must be in the future");
+        require(bytes(_location).length > 0, "Location cannot be empty");
+        
+        listingCounter++;
+        uint256 newListingId = listingCounter;
+        
+        foodListings[newListingId] = FoodListing({
+            listingId: newListingId,
+            donor: msg.sender,
+            foodName: _foodName,
+            description: _description,
+            category: _category,
+            quantity: _quantity,
+            imageHash: _imageHash,
+            location: _location,
+            expiryTime: _expiryTime,
+            createdAt: block.timestamp,
+            pricePerUnit: _pricePerUnit,
+            isAvailable: true,
+            isVerified: false,
+            condition: _condition,
+            listingType: _listingType
+        });
+        
+        userListings[msg.sender].push(newListingId);
+        locationListings[_location].push(newListingId);
+        categoryListings[_category].push(newListingId);
+        users[msg.sender].totalDonations++;
+        
+        emit FoodListed(newListingId, msg.sender, _foodName, _quantity, block.timestamp);
+        return newListingId;
+    }
+    
+    /**
+     * @dev Core Function 3: Claim Food
+     * @param _listingId ID of the food listing to claim
+     * @param _quantityClaimed Quantity the user wants to claim
+     * @return claimId The ID of the created food claim
+     */
+    function claimFood(uint256 _listingId, uint256 _quantityClaimed) 
+        public 
+        payable 
+        onlyRegisteredUser 
+        validListing(_listingId) 
+        notExpired(_listingId) 
+        returns (uint256) {
+        
+        FoodListing storage listing = foodListings[_listingId];
+        require(listing.donor != msg.sender, "Cannot claim your own food listing");
+        require(_quantityClaimed > 0, "Claimed quantity must be greater than 0");
+        require(_quantityClaimed <= listing.quantity, "Claimed quantity exceeds available quantity");
+        
+        uint256 totalAmount = _quantityClaimed * listing.pricePerUnit;
+        
+        // Check payment for non-free food
+        if (totalAmount > 0) {
+            require(msg.value >= totalAmount, "Insufficient payment");
+            
+            // Return excess payment
+            if (msg.value > totalAmount) {
+                payable(msg.sender).transfer(msg.value - totalAmount);
+            }
+        }
+        
+        claimCounter++;
+        uint256 newClaimId = claimCounter;
+        
+        foodClaims[newClaimId] = FoodClaim({
+            claimId: newClaimId,
+            listingId: _listingId,
+            claimer: msg.sender,
+            donor: listing.donor,
+            quantityClaimed: _quantityClaimed,
+            totalAmount: totalAmount,
+            claimTime: block.timestamp,
+            isCompleted: false,
+            isConfirmed: false,
+            status: ClaimStatus.PENDING
+        });
+        
+        // Update listing quantity
+        listing.quantity -= _quantityClaimed;
+        if (listing.quantity == 0) {
+            listing.isAvailable = false;
+        }
+        
+        userClaims[msg.sender].push(newClaimId);
+        listingClaims[_listingId].push(newClaimId);
+        users[msg.sender].totalClaims++;
+        
+        emit FoodClaimed(newClaimId, _listingId, msg.sender, _quantityClaimed, block.timestamp);
+        return newClaimId;
+    }
+    
+    // Additional utility functions
+    
+    /**
+     * @dev Confirm food claim (only donor)
+     * @param _claimId ID of the claim to confirm
+     * @return success True if confirmation was successful
+     */
+    function confirmClaim(uint256 _claimId) 
+        public 
+        validClaim(_claimId) 
+        returns (bool) {
+        
+        FoodClaim storage claim = foodClaims[_claimId];
+        require(claim.donor == msg.sender, "Only donor can confirm claim");
+        require(!claim.isConfirmed, "Claim already confirmed");
+        require(claim.status == ClaimStatus.PENDING, "Invalid claim status");
+        
+        claim.isConfirmed = true;
+        claim.status = ClaimStatus.CONFIRMED;
+        
+        emit ClaimConfirmed(_claimId, msg.sender, block.timestamp);
+        return true;
+    }
+    
+    /**
+     * @dev Complete food exchange and distribute payments
+     * @param _claimId ID of the claim to complete
+     * @param _actualQuantity Actual quantity collected (for verification)
+     * @return success True if completion was successful
+     */
+    function completeFoodExchange(uint256 _claimId, uint256 _actualQuantity) 
+        public 
+        validClaim(_claimId) 
+        returns (bool) {
+        
+        FoodClaim storage claim = foodClaims[_claimId];
+        require(
+            claim.claimer == msg.sender || claim.donor == msg.sender,
+            "Only claimer or donor can complete exchange"
+        );
+        require(claim.isConfirmed, "Claim must be confirmed first");
+        require(!claim.isCompleted, "Exchange already completed");
+        
+        claim.isCompleted = true;
+        claim.status = ClaimStatus.COLLECTED;
+        
+        // Calculate sustainability points based on food saved
+        uint256 sustainabilityPoints = _actualQuantity * 10; // 10 points per unit
+        users[claim.claimer].sustainabilityScore += sustainabilityPoints;
+        users[claim.donor].sustainabilityScore += sustainabilityPoints;
+        
+        // Update total food saved globally
+        totalFoodSaved += _actualQuantity;
+        
+        // Distribute payment if it's a paid listing
+        if (claim.totalAmount > 0) {
+            uint256 platformFee = (claim.totalAmount * platformFeePercent) / 100;
+            uint256 donorAmount = claim.totalAmount - platformFee;
+            
+            totalPlatformFees += platformFee;
+            payable(claim.donor).transfer(donorAmount);
+        }
+        
+        emit ClaimCompleted(_claimId, sustainabilityPoints, block.timestamp);
+        emit SustainabilityReward(claim.claimer, sustainabilityPoints, block.timestamp);
+        emit SustainabilityReward(claim.donor, sustainabilityPoints, block.timestamp);
+        
+        return true;
+    }
+    
+    /**
+     * @dev Get food listing details
+     * @param _listingId ID of the food listing
+     * @return All details of the food listing
+     */
+    function getFoodListing(uint256 _listingId) 
+        public 
+        view 
+        validListing(_listingId) 
+        returns (
+            string memory foodName,
+            string memory description,
+            address donor,
+            uint256 quantity,
+            string memory location,
+            uint256 expiryTime,
+            uint256 pricePerUnit,
+            FoodCondition condition,
+            ListingType listingType,
+            bool isVerified
+        ) {
+        FoodListing memory listing = foodListings[_listingId];
+        return (
+            listing.foodName,
+            listing.description,
+            listing.donor,
+            listing.quantity,
+            listing.location,
+            listing.expiryTime,
+            listing.pricePerUnit,
+            listing.condition,
+            listing.listingType,
+            listing.isVerified
+        );
+    }
+    
+    /**
+     * @dev Get user profile information
+     * @param _userAddress Address of the user
+     * @return All user profile details
+     */
+    function getUserProfile(address _userAddress) 
+        public 
+        view 
+        returns (
+            string memory name,
+            string memory location,
+            uint256 totalDonations,
+            uint256 totalClaims,
+            uint256 sustainabilityScore,
+            bool isVerified,
+            UserType userType
+        ) {
+        require(registeredUsers[_userAddress], "User not registered");
+        
+        UserProfile memory user = users[_userAddress];
+        return (
+            user.name,
+            user.location,
+            user.totalDonations,
+            user.totalClaims,
+            user.sustainabilityScore,
+            user.isVerified,
+            user.userType
+        );
+    }
+    
+    /**
+     * @dev Get food listings by location
+     * @param _location Location to search
+     * @return Array of listing IDs in that location
+     */
+    function getFoodListingsByLocation(string memory _location) 
+        public 
+        view 
+        returns (uint256[] memory) {
+        return locationListings[_location];
+    }
+    
+    /**
+     * @dev Get food listings by category
+     * @param _category Category to search
+     * @return Array of listing IDs in that category
+     */
+    function getFoodListingsByCategory(string memory _category) 
+        public 
+        view 
+        returns (uint256[] memory) {
+        return categoryListings[_category];
+    }
+    
+    /**
+     * @dev Get user's food listings
+     * @param _userAddress Address of the user
+     * @return Array of listing IDs created by the user
+     */
+    function getUserListings(address _userAddress) 
+        public 
+        view 
+        returns (uint256[] memory) {
+        require(registeredUsers[_userAddress], "User not registered");
+        return userListings[_userAddress];
+    }
+    
+    /**
+     * @dev Get user's food claims
+     * @param _userAddress Address of the user
+     * @return Array of claim IDs made by the user
+     */
+    function getUserClaims(address _userAddress) 
+        public 
+        view 
+        returns (uint256[] memory) {
+        require(registeredUsers[_userAddress], "User not registered");
+        return userClaims[_userAddress];
+    }
+    
+    /**
+     * @dev Get claim details
+     * @param _claimId ID of the claim
+     * @return All claim details
+     */
+    function getClaimDetails(uint256 _claimId) 
+        public 
+        view 
+        validClaim(_claimId) 
+        returns (
+            uint256 listingId,
+            address claimer,
+            address donor,
+            uint256 quantityClaimed,
+            uint256 totalAmount,
+            bool isCompleted,
+            bool isConfirmed,
+            ClaimStatus status
+        ) {
+        FoodClaim memory claim = foodClaims[_claimId];
+        return (
+            claim.listingId,
+            claim.claimer,
+            claim.donor,
+            claim.quantityClaimed,
+            claim.totalAmount,
+            claim.isCompleted,
+            claim.isConfirmed,
+            claim.status
+        );
+    }
+    
+    /**
+     * @dev Verify food listing (only owner)
+     * @param _listingId ID of the listing to verify
+     * @return success True if verification was successful
+     */
+    function verifyListing(uint256 _listingId) 
+        public 
+        onlyOwner 
+        validListing(_listingId) 
+        returns (bool) {
+        require(!foodListings[_listingId].isVerified, "Listing already verified");
+        
+        foodListings[_listingId].isVerified = true;
+        
+        emit ListingVerified(_listingId, msg.sender, block.timestamp);
+        return true;
+    }
+    
+    /**
+     * @dev Verify user (only owner)
+     * @param _userAddress Address of user to verify
+     * @return success True if verification was successful
+     */
+    function verifyUser(address _userAddress) public onlyOwner returns (bool) {
+        require(registeredUsers[_userAddress], "User not registered");
+        require(!users[_userAddress].isVerified, "User already verified");
+        
+        users[_userAddress].isVerified = true;
+        return true;
+    }
+    
+    /**
+     * @dev Cancel food claim (only claimer, before confirmation)
+     * @param _claimId ID of the claim to cancel
+     * @return success True if cancellation was successful
+     */
+    function cancelClaim(uint256 _claimId) 
+        public 
+        validClaim(_claimId) 
+        returns (bool) {
+        
+        FoodClaim storage claim = foodClaims[_claimId];
+        require(claim.claimer == msg.sender, "Only claimer can cancel");
+        require(!claim.isConfirmed, "Cannot cancel confirmed claim");
+        require(claim.status == ClaimStatus.PENDING, "Invalid claim status");
+        
+        claim.status = ClaimStatus.CANCELLED;
+        
+        // Restore quantity to listing
+        FoodListing storage listing = foodListings[claim.listingId];
+        listing.quantity += claim.quantityClaimed;
+        listing.isAvailable = true;
+        
+        // Refund payment if any
+        if (claim.totalAmount > 0) {
+            payable(claim.claimer).transfer(claim.totalAmount);
+        }
+        
+        return true;
+    }
+    
+    /**
+     * @dev Get platform statistics
+     * @return totalUsers, totalListings, totalClaims, totalFoodSavedKg
+     */
+    function getPlatformStats() 
+        public 
+        view 
+        returns (
+            uint256 totalUsers, 
+            uint256 totalListings, 
+            uint256 totalClaims, 
+            uint256 totalFoodSavedKg
+        ) {
+        return (userCounter, listingCounter, claimCounter, totalFoodSaved);
+    }
+    
+    /**
+     * @dev Update platform fee (only owner)
+     * @param _newFeePercent New fee percentage (0-10%)
+     */
+    function updatePlatformFee(uint256 _newFeePercent) public onlyOwner {
+        require(_newFeePercent <= 10, "Fee cannot exceed 10%");
+        platformFeePercent = _newFeePercent;
+    }
+    
+    /**
+     * @dev Withdraw platform fees (only owner)
+     */
+    function withdrawPlatformFees() public onlyOwner {
+        require(totalPlatformFees > 0, "No fees to withdraw");
+        
+        uint256 amount = totalPlatformFees;
+        totalPlatformFees = 0;
+        
+        payable(owner).transfer(amount);
+    }
+    
+    /**
+     * @dev Remove expired listings (cleanup function)
+     * @param _listingIds Array of listing IDs to check and remove if expired
+     */
+    function removeExpiredListings(uint256[] memory _listingIds) public {
+        for (uint256 i = 0; i < _listingIds.length; i++) {
+            uint256 listingId = _listingIds[i];
+            if (listingId > 0 && listingId <= listingCounter) {
+                if (block.timestamp >= foodListings[listingId].expiryTime) {
+                    foodListings[listingId].isAvailable = false;
+                }
+            }
+        }
+    }
+}
