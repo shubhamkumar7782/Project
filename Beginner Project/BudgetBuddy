@@ -1,0 +1,353 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+/**
+ * @title BudgetBuddy
+ * @dev A decentralized personal finance management system on blockchain
+ */
+contract BudgetBuddy {
+    
+    // Struct to represent an expense
+    struct Expense {
+        uint256 expenseId;
+        string category;
+        uint256 amount;
+        string description;
+        uint256 timestamp;
+        bool isRecurring;
+    }
+    
+    // Struct to represent a budget
+    struct Budget {
+        string category;
+        uint256 limitAmount;
+        uint256 spentAmount;
+        uint256 monthYear; // Format: YYYYMM (e.g., 202501 for Jan 2025)
+        bool isActive;
+    }
+    
+    // Struct to represent a savings goal
+    struct SavingsGoal {
+        uint256 goalId;
+        string goalName;
+        uint256 targetAmount;
+        uint256 currentAmount;
+        uint256 deadline;
+        bool isCompleted;
+    }
+    
+    // State variables
+    mapping(address => mapping(uint256 => Expense)) public userExpenses;
+    mapping(address => uint256) public expenseCount;
+    
+    mapping(address => mapping(string => mapping(uint256 => Budget))) public userBudgets;
+    mapping(address => mapping(uint256 => SavingsGoal)) public userSavingsGoals;
+    mapping(address => uint256) public savingsGoalCount;
+    
+    mapping(address => uint256) public totalSavings;
+    mapping(address => bool) public isRegistered;
+    
+    uint256 public totalUsers;
+    
+    // Events
+    event UserRegistered(address indexed user, uint256 timestamp);
+    event ExpenseAdded(address indexed user, uint256 indexed expenseId, string category, uint256 amount);
+    event BudgetSet(address indexed user, string category, uint256 limitAmount, uint256 monthYear);
+    event BudgetExceeded(address indexed user, string category, uint256 overspent);
+    event SavingsGoalCreated(address indexed user, uint256 indexed goalId, string goalName, uint256 targetAmount);
+    event SavingsDeposited(address indexed user, uint256 indexed goalId, uint256 amount);
+    event SavingsGoalCompleted(address indexed user, uint256 indexed goalId);
+    event SavingsWithdrawn(address indexed user, uint256 amount);
+    
+    // Modifiers
+    modifier onlyRegistered() {
+        require(isRegistered[msg.sender], "User not registered");
+        _;
+    }
+    
+    constructor() {
+        totalUsers = 0;
+    }
+    
+    /**
+     * @dev Register a new user on the platform
+     */
+    function registerUser() public {
+        require(!isRegistered[msg.sender], "User already registered");
+        
+        isRegistered[msg.sender] = true;
+        totalUsers++;
+        
+        emit UserRegistered(msg.sender, block.timestamp);
+    }
+    
+    /**
+     * @dev Add a new expense entry
+     * @param _category Category of expense (e.g., "Food", "Transport", "Entertainment")
+     * @param _amount Amount spent in wei
+     * @param _description Brief description of the expense
+     * @param _isRecurring Whether this is a recurring expense
+     */
+    function addExpense(
+        string memory _category,
+        uint256 _amount,
+        string memory _description,
+        bool _isRecurring
+    ) public onlyRegistered {
+        require(bytes(_category).length > 0, "Category cannot be empty");
+        require(_amount > 0, "Amount must be greater than 0");
+        
+        expenseCount[msg.sender]++;
+        uint256 newExpenseId = expenseCount[msg.sender];
+        
+        userExpenses[msg.sender][newExpenseId] = Expense({
+            expenseId: newExpenseId,
+            category: _category,
+            amount: _amount,
+            description: _description,
+            timestamp: block.timestamp,
+            isRecurring: _isRecurring
+        });
+        
+        // Update budget spent amount for current month
+        uint256 currentMonthYear = getCurrentMonthYear();
+        Budget storage budget = userBudgets[msg.sender][_category][currentMonthYear];
+        
+        if (budget.isActive) {
+            budget.spentAmount += _amount;
+            
+            // Check if budget exceeded
+            if (budget.spentAmount > budget.limitAmount) {
+                uint256 overspent = budget.spentAmount - budget.limitAmount;
+                emit BudgetExceeded(msg.sender, _category, overspent);
+            }
+        }
+        
+        emit ExpenseAdded(msg.sender, newExpenseId, _category, _amount);
+    }
+    
+    /**
+     * @dev Set a monthly budget for a specific category
+     * @param _category Category to set budget for
+     * @param _limitAmount Maximum amount allowed for this category
+     * @param _monthYear Month and year in YYYYMM format
+     */
+    function setBudget(
+        string memory _category,
+        uint256 _limitAmount,
+        uint256 _monthYear
+    ) public onlyRegistered {
+        require(bytes(_category).length > 0, "Category cannot be empty");
+        require(_limitAmount > 0, "Limit amount must be greater than 0");
+        require(_monthYear >= 202501, "Invalid month year format");
+        
+        Budget storage budget = userBudgets[msg.sender][_category][_monthYear];
+        
+        budget.category = _category;
+        budget.limitAmount = _limitAmount;
+        budget.monthYear = _monthYear;
+        budget.isActive = true;
+        
+        // Keep existing spent amount if updating
+        if (budget.spentAmount == 0) {
+            budget.spentAmount = 0;
+        }
+        
+        emit BudgetSet(msg.sender, _category, _limitAmount, _monthYear);
+    }
+    
+    /**
+     * @dev Create a savings goal
+     * @param _goalName Name of the savings goal
+     * @param _targetAmount Target amount to save
+     * @param _deadline Deadline timestamp for achieving the goal
+     */
+    function createSavingsGoal(
+        string memory _goalName,
+        uint256 _targetAmount,
+        uint256 _deadline
+    ) public onlyRegistered {
+        require(bytes(_goalName).length > 0, "Goal name cannot be empty");
+        require(_targetAmount > 0, "Target amount must be greater than 0");
+        require(_deadline > block.timestamp, "Deadline must be in the future");
+        
+        savingsGoalCount[msg.sender]++;
+        uint256 newGoalId = savingsGoalCount[msg.sender];
+        
+        userSavingsGoals[msg.sender][newGoalId] = SavingsGoal({
+            goalId: newGoalId,
+            goalName: _goalName,
+            targetAmount: _targetAmount,
+            currentAmount: 0,
+            deadline: _deadline,
+            isCompleted: false
+        });
+        
+        emit SavingsGoalCreated(msg.sender, newGoalId, _goalName, _targetAmount);
+    }
+    
+    /**
+     * @dev Deposit funds towards a savings goal
+     * @param _goalId ID of the savings goal
+     */
+    function depositToSavingsGoal(uint256 _goalId) public payable onlyRegistered {
+        require(_goalId > 0 && _goalId <= savingsGoalCount[msg.sender], "Invalid goal ID");
+        require(msg.value > 0, "Must send ETH to deposit");
+        
+        SavingsGoal storage goal = userSavingsGoals[msg.sender][_goalId];
+        require(!goal.isCompleted, "Goal already completed");
+        
+        goal.currentAmount += msg.value;
+        totalSavings[msg.sender] += msg.value;
+        
+        emit SavingsDeposited(msg.sender, _goalId, msg.value);
+        
+        // Check if goal is now completed
+        if (goal.currentAmount >= goal.targetAmount) {
+            goal.isCompleted = true;
+            emit SavingsGoalCompleted(msg.sender, _goalId);
+        }
+    }
+    
+    /**
+     * @dev Withdraw savings
+     * @param _amount Amount to withdraw
+     */
+    function withdrawSavings(uint256 _amount) public onlyRegistered {
+        require(_amount > 0, "Amount must be greater than 0");
+        require(totalSavings[msg.sender] >= _amount, "Insufficient savings balance");
+        require(address(this).balance >= _amount, "Insufficient contract balance");
+        
+        totalSavings[msg.sender] -= _amount;
+        payable(msg.sender).transfer(_amount);
+        
+        emit SavingsWithdrawn(msg.sender, _amount);
+    }
+    
+    /**
+     * @dev Get expense details
+     * @param _expenseId ID of the expense
+     */
+    function getExpense(uint256 _expenseId) public view returns (
+        string memory category,
+        uint256 amount,
+        string memory description,
+        uint256 timestamp,
+        bool isRecurring
+    ) {
+        require(_expenseId > 0 && _expenseId <= expenseCount[msg.sender], "Invalid expense ID");
+        Expense memory expense = userExpenses[msg.sender][_expenseId];
+        return (
+            expense.category,
+            expense.amount,
+            expense.description,
+            expense.timestamp,
+            expense.isRecurring
+        );
+    }
+    
+    /**
+     * @dev Get budget details for a category and month
+     * @param _category Category name
+     * @param _monthYear Month and year in YYYYMM format
+     */
+    function getBudget(string memory _category, uint256 _monthYear) public view returns (
+        uint256 limitAmount,
+        uint256 spentAmount,
+        bool isActive,
+        uint256 remaining
+    ) {
+        Budget memory budget = userBudgets[msg.sender][_category][_monthYear];
+        uint256 remainingAmount = 0;
+        
+        if (budget.isActive && budget.limitAmount > budget.spentAmount) {
+            remainingAmount = budget.limitAmount - budget.spentAmount;
+        }
+        
+        return (
+            budget.limitAmount,
+            budget.spentAmount,
+            budget.isActive,
+            remainingAmount
+        );
+    }
+    
+    /**
+     * @dev Get savings goal details
+     * @param _goalId ID of the savings goal
+     */
+    function getSavingsGoal(uint256 _goalId) public view returns (
+        string memory goalName,
+        uint256 targetAmount,
+        uint256 currentAmount,
+        uint256 deadline,
+        bool isCompleted,
+        uint256 percentageComplete
+    ) {
+        require(_goalId > 0 && _goalId <= savingsGoalCount[msg.sender], "Invalid goal ID");
+        SavingsGoal memory goal = userSavingsGoals[msg.sender][_goalId];
+        
+        uint256 percentage = 0;
+        if (goal.targetAmount > 0) {
+            percentage = (goal.currentAmount * 100) / goal.targetAmount;
+        }
+        
+        return (
+            goal.goalName,
+            goal.targetAmount,
+            goal.currentAmount,
+            goal.deadline,
+            goal.isCompleted,
+            percentage
+        );
+    }
+    
+    /**
+     * @dev Get total savings balance for the user
+     */
+    function getMySavingsBalance() public view onlyRegistered returns (uint256) {
+        return totalSavings[msg.sender];
+    }
+    
+    /**
+     * @dev Get total number of expenses for the user
+     */
+    function getMyExpenseCount() public view onlyRegistered returns (uint256) {
+        return expenseCount[msg.sender];
+    }
+    
+    /**
+     * @dev Get current month year in YYYYMM format
+     */
+    function getCurrentMonthYear() public view returns (uint256) {
+        // Simple implementation - in production, use Chainlink oracle for accurate dates
+        // For now, returns a placeholder that can be set by the user
+        return 202509; // September 2025
+    }
+    
+    /**
+     * @dev Check if budget is exceeded for a category in current month
+     * @param _category Category to check
+     */
+    function isBudgetExceeded(string memory _category) public view onlyRegistered returns (bool, uint256) {
+        uint256 currentMonthYear = getCurrentMonthYear();
+        Budget memory budget = userBudgets[msg.sender][_category][currentMonthYear];
+        
+        if (!budget.isActive) {
+            return (false, 0);
+        }
+        
+        if (budget.spentAmount > budget.limitAmount) {
+            return (true, budget.spentAmount - budget.limitAmount);
+        }
+        
+        return (false, 0);
+    }
+    
+    /**
+     * @dev Get contract balance
+     */
+    function getContractBalance() public view returns (uint256) {
+        return address(this).balance;
+    }
+}
