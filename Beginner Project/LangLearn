@@ -1,0 +1,208 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+/**
+ * @title LangLearn
+ * @dev A decentralized language learning platform with tokenized rewards
+ */
+contract LangLearn {
+    
+    // Struct to represent a learner
+    struct Learner {
+        address learnerAddress;
+        string username;
+        uint256 totalPoints;
+        uint256 coursesCompleted;
+        bool isRegistered;
+    }
+    
+    // Struct to represent a course
+    struct Course {
+        uint256 courseId;
+        string courseName;
+        string language;
+        uint256 rewardPoints;
+        address instructor;
+        bool isActive;
+    }
+    
+    // State variables
+    mapping(address => Learner) public learners;
+    mapping(uint256 => Course) public courses;
+    mapping(address => mapping(uint256 => bool)) public courseCompletions;
+    
+    uint256 public totalLearners;
+    uint256 public totalCourses;
+    uint256 public constant POINTS_PER_ETH = 1000;
+    
+    address public owner;
+    
+    // Events
+    event LearnerRegistered(address indexed learner, string username);
+    event CourseCreated(uint256 indexed courseId, string courseName, string language);
+    event CourseCompleted(address indexed learner, uint256 indexed courseId, uint256 rewardPoints);
+    event PointsRedeemed(address indexed learner, uint256 points, uint256 ethAmount);
+    
+    // Modifiers
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Only owner can call this function");
+        _;
+    }
+    
+    modifier onlyRegistered() {
+        require(learners[msg.sender].isRegistered, "Learner not registered");
+        _;
+    }
+    
+    constructor() {
+        owner = msg.sender;
+        totalCourses = 0;
+        totalLearners = 0;
+    }
+    
+    /**
+     * @dev Register a new learner on the platform
+     * @param _username Username for the learner
+     */
+    function registerLearner(string memory _username) public {
+        require(!learners[msg.sender].isRegistered, "Learner already registered");
+        require(bytes(_username).length > 0, "Username cannot be empty");
+        
+        learners[msg.sender] = Learner({
+            learnerAddress: msg.sender,
+            username: _username,
+            totalPoints: 0,
+            coursesCompleted: 0,
+            isRegistered: true
+        });
+        
+        totalLearners++;
+        emit LearnerRegistered(msg.sender, _username);
+    }
+    
+    /**
+     * @dev Create a new language course
+     * @param _courseName Name of the course
+     * @param _language Language being taught
+     * @param _rewardPoints Points awarded upon completion
+     */
+    function createCourse(
+        string memory _courseName,
+        string memory _language,
+        uint256 _rewardPoints
+    ) public onlyOwner {
+        require(bytes(_courseName).length > 0, "Course name cannot be empty");
+        require(bytes(_language).length > 0, "Language cannot be empty");
+        require(_rewardPoints > 0, "Reward points must be greater than 0");
+        
+        totalCourses++;
+        courses[totalCourses] = Course({
+            courseId: totalCourses,
+            courseName: _courseName,
+            language: _language,
+            rewardPoints: _rewardPoints,
+            instructor: msg.sender,
+            isActive: true
+        });
+        
+        emit CourseCreated(totalCourses, _courseName, _language);
+    }
+    
+    /**
+     * @dev Mark a course as completed and award points to learner
+     * @param _courseId ID of the completed course
+     */
+    function completeCourse(uint256 _courseId) public onlyRegistered {
+        require(_courseId > 0 && _courseId <= totalCourses, "Invalid course ID");
+        require(courses[_courseId].isActive, "Course is not active");
+        require(!courseCompletions[msg.sender][_courseId], "Course already completed");
+        
+        Course memory course = courses[_courseId];
+        
+        learners[msg.sender].totalPoints += course.rewardPoints;
+        learners[msg.sender].coursesCompleted++;
+        courseCompletions[msg.sender][_courseId] = true;
+        
+        emit CourseCompleted(msg.sender, _courseId, course.rewardPoints);
+    }
+    
+    /**
+     * @dev Redeem accumulated points for ETH rewards
+     * @param _points Number of points to redeem
+     */
+    function redeemPoints(uint256 _points) public onlyRegistered {
+        require(_points > 0, "Points must be greater than 0");
+        require(learners[msg.sender].totalPoints >= _points, "Insufficient points");
+        
+        uint256 ethAmount = (_points * 1 ether) / POINTS_PER_ETH;
+        require(address(this).balance >= ethAmount, "Insufficient contract balance");
+        
+        learners[msg.sender].totalPoints -= _points;
+        
+        payable(msg.sender).transfer(ethAmount);
+        
+        emit PointsRedeemed(msg.sender, _points, ethAmount);
+    }
+    
+    /**
+     * @dev Get learner details
+     * @param _learner Address of the learner
+     */
+    function getLearnerDetails(address _learner) public view returns (
+        string memory username,
+        uint256 totalPoints,
+        uint256 coursesCompleted,
+        bool isRegistered
+    ) {
+        Learner memory learner = learners[_learner];
+        return (
+            learner.username,
+            learner.totalPoints,
+            learner.coursesCompleted,
+            learner.isRegistered
+        );
+    }
+    
+    /**
+     * @dev Get course details
+     * @param _courseId ID of the course
+     */
+    function getCourseDetails(uint256 _courseId) public view returns (
+        string memory courseName,
+        string memory language,
+        uint256 rewardPoints,
+        address instructor,
+        bool isActive
+    ) {
+        require(_courseId > 0 && _courseId <= totalCourses, "Invalid course ID");
+        Course memory course = courses[_courseId];
+        return (
+            course.courseName,
+            course.language,
+            course.rewardPoints,
+            course.instructor,
+            course.isActive
+        );
+    }
+    
+    /**
+     * @dev Fund the contract to enable point redemption
+     */
+    function fundContract() public payable onlyOwner {
+        require(msg.value > 0, "Must send ETH to fund contract");
+    }
+    
+    /**
+     * @dev Get contract balance
+     */
+    function getContractBalance() public view returns (uint256) {
+        return address(this).balance;
+    }
+    
+    /**
+     * @dev Withdraw contract funds (only owner)
+     */
+    function withdraw() public onlyOwner {
+        payable(owner).transfer(address(this).balance);
+    }
+}
